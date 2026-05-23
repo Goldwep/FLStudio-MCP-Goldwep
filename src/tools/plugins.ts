@@ -115,7 +115,7 @@ export function registerPluginsTools(server: McpServer, bridge: Bridge): void {
     "plugins_set_param",
     {
       description:
-        "Set a plugin parameter's normalized value (float 0.0..1.0). Dual addressing: slotIndex=-1 targets the channel-rack instrument at channel `index`; slotIndex>=0 targets the effect at mixer track `index`, slot `slotIndex`. FL's positional order is value, paramIndex, index, slotIndex (value FIRST). Out-of-range value handling is the plugin's responsibility — FL does not clamp universally.",
+        "Set a plugin parameter's normalized value (float 0.0..1.0). Dual addressing: slotIndex=-1 targets the channel-rack instrument at channel `index`; slotIndex>=0 targets the effect at mixer track `index`, slot `slotIndex`. Full FL signature: setParamValue(value, paramIndex, index, slotIndex=-1, pickupMode=PIM_None, useGlobalIndex=False). PickupMode controls hardware-fader pickup semantics (0=None, 1=Pickup, 2=FollowGlobal); useGlobalIndex toggles channel-rack addressing between group-relative and project-global. Out-of-range value handling is the plugin's responsibility — FL does not clamp universally.",
       inputSchema: {
         value: z
           .number()
@@ -127,15 +127,32 @@ export function registerPluginsTools(server: McpServer, bridge: Bridge): void {
         paramIndex: paramIndexSchema,
         index: indexSchema,
         slotIndex: slotIndexSchema,
+        pickupMode: z
+          .number()
+          .int()
+          .min(0)
+          .max(2)
+          .default(0)
+          .describe(
+            "PIM_* pickup mode: 0=None (default), 1=Pickup, 2=FollowGlobal. KL3Plugin.py uses 2 for fader writes; default 0 is safest for MCP scripted writes.",
+          ),
+        useGlobalIndex: z
+          .boolean()
+          .default(false)
+          .describe(
+            "If true, treat `index` as a project-global channel index (API v26+). Default false uses group-relative addressing — match this to your channels_count call's frame of reference.",
+          ),
       },
     },
-    async ({ value, paramIndex, index, slotIndex }) =>
+    async ({ value, paramIndex, index, slotIndex, pickupMode, useGlobalIndex }) =>
       jsonResult(
         await bridge.call("plugins.setParamValue", {
           value,
           paramIndex,
           index,
           slotIndex,
+          pickupMode,
+          useGlobalIndex,
         }),
       ),
   );

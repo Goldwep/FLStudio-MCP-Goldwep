@@ -40,16 +40,46 @@ export function registerTransportTools(server: McpServer, bridge: Bridge): void 
     "transport_set_tempo",
     {
       description:
-        "Set the FL Studio project tempo in BPM. Bridge-side translates this into general.processRECEvent(REC_Tempo, int(bpm*1000), REC_Controller) — REC plumbing is hidden from the MCP layer.",
+        "Set the FL Studio project tempo in BPM. Uses the direct setter mixer.setCurrentTempo (not REC plumbing) — the absolute path. For relative nudges (encoder jog), use a future transport_nudge_tempo tool.",
       inputSchema: {
         bpm: z
           .number()
           .min(10)
           .max(999)
-          .describe("Tempo in BPM. Bridge encodes as bpm*1000 for REC_Tempo."),
+          .describe("Tempo in BPM (absolute value)."),
       },
     },
-    async ({ bpm }) => jsonResult(await bridge.call("transport.setTempo", { bpm })),
+    async ({ bpm }) => jsonResult(await bridge.call("mixer.setCurrentTempo", { bpm })),
+  );
+
+  server.registerTool(
+    "transport_toggle_metronome",
+    {
+      description:
+        "Toggle the FL Studio metronome on/off. Bridge translates to transport.globalTransport(FPT_Metronome, 1). No args.",
+      inputSchema: {},
+    },
+    async () => jsonResult(await bridge.call("transport.toggleMetronome")),
+  );
+
+  server.registerTool(
+    "transport_tap_tempo",
+    {
+      description:
+        "Send a tap-tempo pulse. Repeated calls converge FL on the tapped tempo. Bridge translates to transport.globalTransport(FPT_TapTempo, 1). No args.",
+      inputSchema: {},
+    },
+    async () => jsonResult(await bridge.call("transport.tapTempo")),
+  );
+
+  server.registerTool(
+    "transport_record",
+    {
+      description:
+        "Toggle FL Studio record arm. Used to start AND stop arm (same toggle). Pair with transport_play to begin recording.",
+      inputSchema: {},
+    },
+    async () => jsonResult(await bridge.call("transport.record")),
   );
 
   server.registerTool(

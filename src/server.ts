@@ -18,6 +18,9 @@ import { registerGeneralExtraTools } from "./tools/general_extra.js";
 import { registerArrangementTools } from "./tools/arrangement.js";
 import { registerUiTools } from "./tools/ui.js";
 
+// L5 — composition v1: step grid.
+import { registerChannelsStepsTools } from "./tools/channels_steps.js";
+
 // One bridge instance is shared across every tool module so that all FL
 // Studio API calls flow through a single queue-and-drain chokepoint (per
 // the runtime model in projects/flstudio_mcp_goldwep.md).
@@ -44,4 +47,8 @@ export function registerTools(server: McpServer, config: Config): void {
   registerPluginsTools(server, bridge);
   registerArrangementTools(server, bridge);
   registerUiTools(server, bridge);
+
+  // L5 — composition v1 (step grid). Sits after registerChannelsTools so
+  // step-grid tools are a clear extension surface above L2/L4 channel ops.
+  registerChannelsStepsTools(server, bridge);
 }

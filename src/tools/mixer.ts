@@ -156,6 +156,38 @@ export function registerMixerTools(server: McpServer, bridge: Bridge): void {
   );
 
   server.registerTool(
+    "mixer_arm_track",
+    {
+      description: "Arm or disarm a mixer track for recording. Bridge translates to mixer.armTrack(index).",
+      inputSchema: {
+        index: trackIndex,
+      },
+    },
+    async ({ index }) => jsonResult(await bridge.call("mixer.armTrack", { index })),
+  );
+
+  server.registerTool(
+    "mixer_link_channel_to_track",
+    {
+      description:
+        "Route a channel-rack channel to a mixer track (direct alternative to channel_set_target_fx_track). Bridge translates to mixer.linkChannelToTrack(channel, track, select).",
+      inputSchema: {
+        channel: z.number().int().min(0).describe("Channel rack index (0-based)"),
+        track: z.number().int().min(0).describe("Mixer track index (0=Master)"),
+        select: z
+          .number()
+          .int()
+          .min(0)
+          .max(1)
+          .default(0)
+          .describe("Select the channel after routing (0/1)"),
+      },
+    },
+    async ({ channel, track, select }) =>
+      jsonResult(await bridge.call("mixer.linkChannelToTrack", { channel, track, select })),
+  );
+
+  server.registerTool(
     "mixer_set_route",
     {
       description: "Enable or disable a mixer routing from source track to destination track. value: 1=enable route, 0=disable route. Performs two FL calls atomically: setRouteTo then afterRoutingChanged (required — without the notify, the change silently fails to propagate).",
@@ -174,49 +206,55 @@ export function registerMixerTools(server: McpServer, bridge: Bridge): void {
   server.registerTool(
     "mixer_set_send_level",
     {
-      description: "Set the send level from a mixer track to a destination track. Bridge composes the REC event via getTrackPluginId + REC_Mixer_Send_First + dest. Value is normalized 0..1 typically.",
+      description:
+        "Set the absolute send level from source to destination mixer track. Uses mixer.setRouteToLevel (direct setter, 0..1 float). For automatable knob-style sends use a future automate-send tool with REC plumbing.",
       inputSchema: {
-        track: z.number().int().min(0).describe("Source mixer track"),
+        source: z.number().int().min(0).describe("Source mixer track"),
         dest: z.number().int().min(0).describe("Destination mixer track"),
-        value: z.number().describe("Normalized 0..1 typically; depends on REC encoding"),
+        level: z.number().min(0).max(1).describe("Send level (0.0 = silent, 1.0 = unity)"),
       },
     },
-    async ({ track, dest, value }) => jsonResult(await bridge.call("mixer.setSendLevel", { track, dest, value })),
+    async ({ source, dest, level }) =>
+      jsonResult(await bridge.call("mixer.setRouteToLevel", { source, dest, level })),
   );
 
   server.registerTool(
     "mixer_set_eq_gain",
     {
-      description: "Set the EQ gain for a mixer track band. Bridge composes via getTrackPluginId + REC_Mixer_EQ_Gain + band. The built-in strip EQ has 3 visible bands (low/mid/high); bands 3..7 likely no-op on the default strip.",
+      description:
+        "Set the EQ gain for a mixer track band using the direct setter mixer.setEqGain(index, band, value). The built-in strip EQ has 3 visible bands (0=low, 1=mid, 2=high); the underlying REC space allots 8 but only the first 3 affect the visible strip.",
       inputSchema: {
-        track: z.number().int().min(0),
+        index: z.number().int().min(0).describe("Mixer track index"),
         band: z
           .number()
           .int()
           .min(0)
-          .max(7)
-          .describe("EQ band: 0..2 = visible strip EQ (low/mid/high); 3..7 = extended (likely no-op on default strip)"),
-        value: z.number().describe("Normalized 0..1 typically; depends on REC encoding"),
+          .max(2)
+          .describe("EQ band: 0=low, 1=mid, 2=high"),
+        value: z.number().min(0).max(1).describe("Normalized gain (0..1)"),
       },
     },
-    async ({ track, band, value }) => jsonResult(await bridge.call("mixer.setEqGain", { track, band, value })),
+    async ({ index, band, value }) =>
+      jsonResult(await bridge.call("mixer.setEqGain", { index, band, value })),
   );
 
   server.registerTool(
     "mixer_set_eq_freq",
     {
-      description: "Set the EQ frequency for a mixer track band. Bridge composes via getTrackPluginId + REC_Mixer_EQ_Freq + band. The built-in strip EQ has 3 visible bands (low/mid/high); bands 3..7 likely no-op on the default strip.",
+      description:
+        "Set the EQ frequency for a mixer track band using the direct setter mixer.setEqFrequency(index, band, value).",
       inputSchema: {
-        track: z.number().int().min(0),
+        index: z.number().int().min(0).describe("Mixer track index"),
         band: z
           .number()
           .int()
           .min(0)
-          .max(7)
-          .describe("EQ band: 0..2 = visible strip EQ (low/mid/high); 3..7 = extended (likely no-op on default strip)"),
-        value: z.number().describe("Normalized 0..1 typically; depends on REC encoding"),
+          .max(2)
+          .describe("EQ band: 0=low, 1=mid, 2=high"),
+        value: z.number().min(0).max(1).describe("Normalized frequency (0..1)"),
       },
     },
-    async ({ track, band, value }) => jsonResult(await bridge.call("mixer.setEqFreq", { track, band, value })),
+    async ({ index, band, value }) =>
+      jsonResult(await bridge.call("mixer.setEqFrequency", { index, band, value })),
   );
 }
