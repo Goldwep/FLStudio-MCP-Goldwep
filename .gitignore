@@ -1,0 +1,23 @@
+node_modules/
+dist/
+*.js.map
+.env
+flstudio-mcp.config.json
+*.tsbuildinfo
+*.pdf
+.claude/
+nul
+
+# Project runtime cache (created by bridge / scanner)
+.flstudio-mcp/
+*.db
+*.db-shm
+*.db-wal
+
+# FL Studio user artifacts (never commit user projects)
+*.flp
+*.flpkg
+*.fst
+*.fnv
+*.zip
+Backup/

@@ -1,0 +1,63 @@
+{
+  "name": "flstudio-mcp-goldwep",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "MCP server for FL Studio (Image-Line) — full-spectrum composition and project inspection over a localhost socket bridge into FL Studio's bundled Python scripting environment.",
+  "author": "goldwep",
+  "bin": {
+    "flstudio-mcp-goldwep": "./dist/index.js"
+  },
+  "scripts": {
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "prepare": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "eslint": "^9.15.0",
+    "prettier": "^3.3.3",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "typescript-eslint": "^8.15.0",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "files": [
+    "dist",
+    "bridge",
+    "docs",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Goldwep/FLStudio-MCP-Goldwep.git"
+  },
+  "homepage": "https://github.com/Goldwep/FLStudio-MCP-Goldwep",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "fl-studio",
+    "flstudio",
+    "image-line",
+    "daw",
+    "midi",
+    "music-production",
+    "composition",
+    "model-context-protocol",
+    "goldwep"
+  ]
+}
