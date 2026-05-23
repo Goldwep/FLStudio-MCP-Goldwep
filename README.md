@@ -38,6 +38,16 @@ data/       static reference data
 
 Not published yet. Local-dev install instructions will land at v0.1+.
 
+### Optional: L7 PyFLP project intelligence
+
+The `flp_*` tools (project scanning, plugin inventory, tempo distribution, etc.) parse `.flp` files off disk via a Python subprocess — they don't need FL Studio running. One-time setup:
+
+```powershell
+"C:\Users\Nathan\AppData\Local\Programs\Python\Python313\python.exe" -m pip install --user pyflp
+```
+
+See [`docs/L7-PYFLP-SETUP.md`](./docs/L7-PYFLP-SETUP.md) for verification, environment overrides, and behavior notes.
+
 ## Credits
 
 - Designed and built by [Goldwep](https://github.com/Goldwep).
