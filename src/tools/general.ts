@@ -16,4 +16,14 @@ export function registerGeneralTools(server: McpServer, bridge: Bridge): void {
     },
     async () => jsonResult(await bridge.call("general.getCurrentProjectTitle")),
   );
+
+  server.registerTool(
+    "general_undo",
+    {
+      description:
+        "Undo the last action in FL Studio. Bridge-side calls general.undo() directly; FL maintains its own undo stack, so we do not call saveUndo() to checkpoint first. No args.",
+      inputSchema: {},
+    },
+    async () => jsonResult(await bridge.call("general.undo")),
+  );
 }

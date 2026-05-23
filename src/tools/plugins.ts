@@ -110,4 +110,54 @@ export function registerPluginsTools(server: McpServer, bridge: Bridge): void {
         }),
       ),
   );
+
+  server.registerTool(
+    "plugins_set_param",
+    {
+      description:
+        "Set a plugin parameter's normalized value (float 0.0..1.0). Dual addressing: slotIndex=-1 targets the channel-rack instrument at channel `index`; slotIndex>=0 targets the effect at mixer track `index`, slot `slotIndex`. FL's positional order is value, paramIndex, index, slotIndex (value FIRST). Out-of-range value handling is the plugin's responsibility — FL does not clamp universally.",
+      inputSchema: {
+        value: z
+          .number()
+          .min(0)
+          .max(1)
+          .describe(
+            "Normalized 0..1 (docs say int but actual is float per research)",
+          ),
+        paramIndex: paramIndexSchema,
+        index: indexSchema,
+        slotIndex: slotIndexSchema,
+      },
+    },
+    async ({ value, paramIndex, index, slotIndex }) =>
+      jsonResult(
+        await bridge.call("plugins.setParamValue", {
+          value,
+          paramIndex,
+          index,
+          slotIndex,
+        }),
+      ),
+  );
+
+  server.registerTool(
+    "plugins_change_preset",
+    {
+      description:
+        "Step a plugin's preset forward (next) or backward (prev). Dual addressing: slotIndex=-1 targets the channel-rack instrument at channel `index`; slotIndex>=0 targets the effect at mixer track `index`, slot `slotIndex`. Third-party VSTs may no-op if their wrapper does not expose preset banks (Arturia gates this on a known-controllable plugin list).",
+      inputSchema: {
+        index: indexSchema,
+        slotIndex: slotIndexSchema,
+        direction: z.enum(["next", "prev"]),
+      },
+    },
+    async ({ index, slotIndex, direction }) =>
+      jsonResult(
+        await bridge.call("plugins.changePreset", {
+          index,
+          slotIndex,
+          direction,
+        }),
+      ),
+  );
 }
