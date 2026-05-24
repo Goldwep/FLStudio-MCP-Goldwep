@@ -33,11 +33,12 @@ export function registerStateSyncTools(server: McpServer, bridge: Bridge): void 
         enabled: z
           .boolean()
           .default(true)
-          .describe("true = start accumulating dirty events; false = stop and discard further events (queue is preserved until drained)."),
+          .describe(
+            "true = start accumulating dirty events; false = stop and discard further events (queue is preserved until drained).",
+          ),
       },
     },
-    async ({ enabled }) =>
-      jsonResult(await bridge.call("state.setSubscribed", { enabled })),
+    async ({ enabled }) => jsonResult(await bridge.call("state.setSubscribed", { enabled })),
   );
 
   server.registerTool(
@@ -45,13 +46,13 @@ export function registerStateSyncTools(server: McpServer, bridge: Bridge): void 
     {
       description:
         "Drain and return all accumulated dirty events since the last drain (or since state_subscribe was first enabled). Returns an empty list if nothing changed. Event schema:\n" +
-        "  { kind: \"channel\", index: number, flag: 0|1|2|3|4, flag_name: \"CE_New\"|\"CE_Delete\"|\"CE_Replace\"|\"CE_Rename\"|\"CE_Select\" }\n" +
+        '  { kind: "channel", index: number, flag: 0|1|2|3|4, flag_name: "CE_New"|"CE_Delete"|"CE_Replace"|"CE_Rename"|"CE_Select" }\n' +
         "    — CE_* flag from OnDirtyChannel. CE_New=0, CE_Delete=1, CE_Replace=2, CE_Rename=3, CE_Select=4.\n" +
-        "  { kind: \"mixer_track\", index: number }\n" +
+        '  { kind: "mixer_track", index: number }\n' +
         "    — from OnDirtyMixerTrack. index = -1 means ALL tracks dirty (FL convention).\n" +
-        "  { kind: \"refresh\", flags: number }\n" +
+        '  { kind: "refresh", flags: number }\n' +
         "    — HW_Dirty_* bitmask from OnRefresh (broad state-change signal).\n" +
-        "  { kind: \"song_pos\", position: number }\n" +
+        '  { kind: "song_pos", position: number }\n' +
         "    — current song position (from OnUpdateBeatIndicator-style callbacks).\n" +
         "Events are returned in arrival order. Drain is destructive: a second consecutive call returns []. Returns [] also if state_subscribe was never enabled.",
       inputSchema: {},
@@ -67,25 +68,33 @@ export function registerStateSyncTools(server: McpServer, bridge: Bridge): void 
       inputSchema: {},
     },
     async () => {
-      const [
-        isPlaying,
-        projectTitle,
-        channelCount,
-        mixerTrackCount,
-        patternCount,
-      ] = await Promise.all([
+      // Promise.allSettled (NOT Promise.all) so a single bridge.call failure
+      // — e.g. BRIDGE_NOT_READY against the v0.9 StubBridge — doesn't nuke
+      // the whole snapshot. Each field carries its own {ok, value|error}.
+      const results = await Promise.allSettled([
         bridge.call("transport.isPlaying"),
-        bridge.call("general.getCurrentProjectTitle"),
+        bridge.call("general.getProjectTitle"),
         bridge.call("channels.channelCount"),
         bridge.call("mixer.trackCount"),
         bridge.call("patterns.patternCount"),
       ]);
+      const [isPlayingR, projectTitleR, channelCountR, mixerTrackCountR, patternCountR] = results;
+      const unwrap = (r: PromiseSettledResult<unknown>) =>
+        r.status === "fulfilled"
+          ? { ok: true as const, value: r.value }
+          : {
+              ok: false as const,
+              error: r.reason instanceof Error ? r.reason.message : String(r.reason),
+            };
       return jsonResult({
         timestamp: Date.now(),
-        transport: { isPlaying, projectTitle },
-        channels: { count: channelCount },
-        mixer: { count: mixerTrackCount },
-        patterns: { count: patternCount },
+        transport: {
+          isPlaying: unwrap(isPlayingR),
+          projectTitle: unwrap(projectTitleR),
+        },
+        channels: { count: unwrap(channelCountR) },
+        mixer: { count: unwrap(mixerTrackCountR) },
+        patterns: { count: unwrap(patternCountR) },
       });
     },
   );
@@ -96,32 +105,29 @@ export function registerStateSyncTools(server: McpServer, bridge: Bridge): void 
       description:
         "Compare two snapshots from state_snapshot and return the delta. Pure TypeScript — no bridge.call. Returns { ok: true, changed: { <key>: { before, after } } } for top-level keys whose JSON serialization differs. Use to detect what changed between two arbitrary points in time (e.g. before/after a long-running tool call). Returns { ok: false, error: ... } if either argument is not an object.",
       inputSchema: {
-        before: z
-          .unknown()
-          .describe("Earlier snapshot object (from state_snapshot)."),
-        after: z
-          .unknown()
-          .describe("Later snapshot object (from state_snapshot)."),
+        before: z.unknown().describe("Earlier snapshot object (from state_snapshot)."),
+        after: z.unknown().describe("Later snapshot object (from state_snapshot)."),
       },
     },
     async ({ before, after }) => {
-      if (
-        typeof before !== "object" ||
-        typeof after !== "object" ||
-        before === null ||
-        after === null
-      ) {
+      // Stricter type guard — typeof === "object" alone admits arrays,
+      // Date, RegExp, Buffer, etc., which JSON.stringify treats inconsistently.
+      // Snapshots are always plain objects from state_snapshot; reject anything
+      // else with a hint pointing the caller at the right tool.
+      const isPlainObject = (x: unknown): x is Record<string, unknown> =>
+        typeof x === "object" && x !== null && Object.getPrototypeOf(x) === Object.prototype;
+      if (!isPlainObject(before) || !isPlainObject(after)) {
         return jsonResult({
           ok: false,
-          error: "Both before and after must be snapshot objects",
+          error:
+            "Both before and after must be plain snapshot objects from state_snapshot. " +
+            "Arrays, Date, RegExp, Buffer, etc. are rejected.",
         });
       }
-      const b = before as Record<string, unknown>;
-      const a = after as Record<string, unknown>;
       const changed: Record<string, { before: unknown; after: unknown }> = {};
-      for (const key of new Set([...Object.keys(b), ...Object.keys(a)])) {
-        if (JSON.stringify(b[key]) !== JSON.stringify(a[key])) {
-          changed[key] = { before: b[key], after: a[key] };
+      for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
+        if (JSON.stringify(before[key]) !== JSON.stringify(after[key])) {
+          changed[key] = { before: before[key], after: after[key] };
         }
       }
       return jsonResult({ ok: true, changed });

@@ -17,13 +17,7 @@ import { mkdir, writeFile, readdir, stat } from "node:fs/promises";
 import { join, resolve, isAbsolute } from "node:path";
 import { homedir } from "node:os";
 
-const DEFAULT_SCRIPTS_SUFFIX = join(
-  "Documents",
-  "Image-Line",
-  "FL Studio",
-  "Settings",
-  "Scripts",
-);
+const DEFAULT_SCRIPTS_SUFFIX = join("Documents", "Image-Line", "FL Studio", "Settings", "Scripts");
 
 export interface DeployResult {
   ok: true;

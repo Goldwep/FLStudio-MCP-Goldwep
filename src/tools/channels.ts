@@ -27,8 +27,7 @@ export function registerChannelsTools(server: McpServer, bridge: Bridge): void {
         index: z.number().int().min(0).describe("Channel rack index (0-based)"),
       },
     },
-    async ({ index }) =>
-      jsonResult(await bridge.call("channels.getChannelName", { index })),
+    async ({ index }) => jsonResult(await bridge.call("channels.getChannelName", { index })),
   );
 
   server.registerTool(
@@ -40,8 +39,7 @@ export function registerChannelsTools(server: McpServer, bridge: Bridge): void {
         index: z.number().int().min(0).describe("Channel rack index (0-based)"),
       },
     },
-    async ({ index }) =>
-      jsonResult(await bridge.call("channels.getChannelColor", { index })),
+    async ({ index }) => jsonResult(await bridge.call("channels.getChannelColor", { index })),
   );
 
   server.registerTool(
@@ -53,8 +51,7 @@ export function registerChannelsTools(server: McpServer, bridge: Bridge): void {
         index: z.number().int().min(0).describe("Channel rack index (0-based)"),
       },
     },
-    async ({ index }) =>
-      jsonResult(await bridge.call("channels.getChannelVolume", { index })),
+    async ({ index }) => jsonResult(await bridge.call("channels.getChannelVolume", { index })),
   );
 
   server.registerTool(
@@ -66,21 +63,18 @@ export function registerChannelsTools(server: McpServer, bridge: Bridge): void {
         index: z.number().int().min(0).describe("Channel rack index (0-based)"),
       },
     },
-    async ({ index }) =>
-      jsonResult(await bridge.call("channels.getChannelPan", { index })),
+    async ({ index }) => jsonResult(await bridge.call("channels.getChannelPan", { index })),
   );
 
   server.registerTool(
     "channel_get_target_fx_track",
     {
-      description:
-        "Get the mixer track index this channel routes to (0 = Master).",
+      description: "Get the mixer track index this channel routes to (0 = Master).",
       inputSchema: {
         index: z.number().int().min(0).describe("Channel rack index (0-based)"),
       },
     },
-    async ({ index }) =>
-      jsonResult(await bridge.call("channels.getTargetFxTrack", { index })),
+    async ({ index }) => jsonResult(await bridge.call("channels.getTargetFxTrack", { index })),
   );
 
   server.registerTool(
@@ -92,8 +86,7 @@ export function registerChannelsTools(server: McpServer, bridge: Bridge): void {
         index: z.number().int().min(0).describe("Channel rack index (0-based)"),
       },
     },
-    async ({ index }) =>
-      jsonResult(await bridge.call("channels.getChannelType", { index })),
+    async ({ index }) => jsonResult(await bridge.call("channels.getChannelType", { index })),
   );
 
   server.registerTool(
@@ -130,7 +123,11 @@ export function registerChannelsTools(server: McpServer, bridge: Bridge): void {
         "Set the channel pan in the range [-1.0, +1.0] (negative = left, positive = right).",
       inputSchema: {
         index: z.number().int().min(0).describe("Channel rack index (0-based)"),
-        value: z.number().min(-1).max(1).describe("Pan [-1.0, +1.0]; negative=left, positive=right"),
+        value: z
+          .number()
+          .min(-1)
+          .max(1)
+          .describe("Pan [-1.0, +1.0]; negative=left, positive=right"),
       },
     },
     async ({ index, value }) =>
@@ -157,8 +154,7 @@ export function registerChannelsTools(server: McpServer, bridge: Bridge): void {
   server.registerTool(
     "channel_set_target_fx_track",
     {
-      description:
-        "Route this channel to a mixer track. 0 = Master, >=1 = numbered mixer track.",
+      description: "Route this channel to a mixer track. 0 = Master, >=1 = numbered mixer track.",
       inputSchema: {
         index: z.number().int().min(0).describe("Channel rack index (0-based)"),
         fxIndex: z
@@ -218,7 +214,6 @@ export function registerChannelsTools(server: McpServer, bridge: Bridge): void {
         index: z.number().int().min(0).describe("Channel rack index (0-based)"),
       },
     },
-    async ({ index }) =>
-      jsonResult(await bridge.call("channels.soloChannel", { index })),
+    async ({ index }) => jsonResult(await bridge.call("channels.soloChannel", { index })),
   );
 }

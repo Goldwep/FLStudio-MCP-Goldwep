@@ -14,7 +14,7 @@ export function registerGeneralTools(server: McpServer, bridge: Bridge): void {
       description: "Return the title of the currently open FL Studio project.",
       inputSchema: {},
     },
-    async () => jsonResult(await bridge.call("general.getCurrentProjectTitle")),
+    async () => jsonResult(await bridge.call("general.getProjectTitle")),
   );
 
   server.registerTool(
@@ -31,7 +31,7 @@ export function registerGeneralTools(server: McpServer, bridge: Bridge): void {
     "general_save_project",
     {
       description:
-        "Save the current FL Studio project. Bridge translates to transport.globalTransport(FPT_Save, 1). Use general_get_changed_flag first to check whether a save is needed.",
+        "Save the current FL Studio project. Bridge-side composite: translates to vendor-confirmed transport.globalTransport(midi.FPT_Save, 1, pmeFlags) — pattern from KLEss3Process.py:660 (FPT_Save=92 per midi.py:411). Use general_get_changed_flag first to check whether a save is needed.",
       inputSchema: {},
     },
     async () => jsonResult(await bridge.call("general.saveProject")),

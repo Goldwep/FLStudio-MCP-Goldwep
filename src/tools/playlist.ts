@@ -23,17 +23,12 @@ export function registerPlaylistTools(server: McpServer, bridge: Bridge): void {
     "playlist_get_track_name",
     {
       description:
-        "Get the display name of a playlist track. Default for an unrenamed track is \"Track n\".",
+        'Get the display name of a playlist track. Default for an unrenamed track is "Track n".',
       inputSchema: {
-        index: z
-          .number()
-          .int()
-          .min(1)
-          .describe("Playlist track index (1-based per the research)"),
+        index: z.number().int().min(1).describe("Playlist track index (1-based per the research)"),
       },
     },
-    async ({ index }) =>
-      jsonResult(await bridge.call("playlist.getTrackName", { index })),
+    async ({ index }) => jsonResult(await bridge.call("playlist.getTrackName", { index })),
   );
 
   server.registerTool(
@@ -42,15 +37,10 @@ export function registerPlaylistTools(server: McpServer, bridge: Bridge): void {
       description:
         "Get the color of a playlist track as a 32-bit integer in 0x--BBGGRR layout (BGRA little-endian).",
       inputSchema: {
-        index: z
-          .number()
-          .int()
-          .min(1)
-          .describe("Playlist track index (1-based per the research)"),
+        index: z.number().int().min(1).describe("Playlist track index (1-based per the research)"),
       },
     },
-    async ({ index }) =>
-      jsonResult(await bridge.call("playlist.getTrackColor", { index })),
+    async ({ index }) => jsonResult(await bridge.call("playlist.getTrackColor", { index })),
   );
 
   server.registerTool(
@@ -58,15 +48,10 @@ export function registerPlaylistTools(server: McpServer, bridge: Bridge): void {
     {
       description: "Returns true if the playlist track at `index` is muted.",
       inputSchema: {
-        index: z
-          .number()
-          .int()
-          .min(1)
-          .describe("Playlist track index (1-based per the research)"),
+        index: z.number().int().min(1).describe("Playlist track index (1-based per the research)"),
       },
     },
-    async ({ index }) =>
-      jsonResult(await bridge.call("playlist.isTrackMuted", { index })),
+    async ({ index }) => jsonResult(await bridge.call("playlist.isTrackMuted", { index })),
   );
 
   server.registerTool(

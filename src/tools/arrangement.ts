@@ -13,7 +13,7 @@ export function registerArrangementTools(server: McpServer, bridge: Bridge): voi
     "arrangement_current_time",
     {
       description:
-        "Get the current arrangement playhead time. The underlying FL API is `arrangement.currentTime(snap: int)` — `snap` is a snap-mode flag (0 = no snap, non-zero = snap to grid), NOT a SONGLENGTH unit. Returned units are FL's default (ticks). For unit-controlled time, use `transport_get_song_pos` instead.",
+        "[UNVERIFIED — manual-only] Get the current arrangement playhead time. `arrangement.currentTime(snap)` is documented but no vendor script calls it; vendor pattern uses the sibling `arrangement.currentTimeHint(mode)` (Novation\\script\\fl.py:505). `snap` is a snap-mode flag (0 = no snap, non-zero = snap to grid), NOT a SONGLENGTH unit. For unit-controlled time, use `transport_get_song_pos` instead.",
       inputSchema: {
         snap: z
           .number()

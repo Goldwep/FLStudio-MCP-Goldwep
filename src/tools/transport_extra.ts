@@ -31,7 +31,7 @@ export function registerTransportExtraTools(server: McpServer, bridge: Bridge): 
     "transport_get_song_length",
     {
       description:
-        "Get the total song length in the unit specified by `unit` (SONGLENGTH_* enum). Returns a float in the requested unit.",
+        "[UNVERIFIED] Get the total song length in the unit specified by `unit` (SONGLENGTH_* enum). Returns a float in the requested unit. transport.getSongLength is documented but has zero vendor-script usage — pair-tool transport_get_song_pos IS vendor-confirmed.",
       inputSchema: {
         unit: z
           .number()

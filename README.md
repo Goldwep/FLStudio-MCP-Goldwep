@@ -1,10 +1,12 @@
 # FL Studio MCP — Goldwep
 
-MCP server for FL Studio (Image-Line). Full-spectrum control surface — composition *and* project inspection — for LLM workflows. Built on a localhost bridge into FL Studio's bundled Python 3.12 MIDI scripting environment, with `.pyscript` deploy + PyFLP project intelligence as auxiliary surfaces.
+MCP server for FL Studio (Image-Line). Full-spectrum control surface — composition _and_ project inspection — for LLM workflows. Built on a localhost bridge into FL Studio's bundled Python 3.12 MIDI scripting environment, with `.pyscript` deploy + PyFLP project intelligence as auxiliary surfaces.
 
-**109 tools shipped across 9 milestones.**
+**110 tools registered across 9 milestones.**
 
-> **Status (2026-05-23): v1.0 candidate.** Tool surface complete (109 tools registered). Bridge transport is gated on the L0 probe — install + run the probe script ([docs/L0-PROBE-RUN.md](./docs/L0-PROBE-RUN.md)) to lock the transport choice (TCP socket vs virtual MIDI). Until the probe lands and the transport is wired, FL-API tools throw `BRIDGE_NOT_READY` at runtime; the registration graph + descriptions are live and the L7 PyFLP / L6 `.pyscript` surfaces work independently of FL being running.
+> **Status (2026-05-23): v0.9.1-pre-bridge.** Tool surface complete (110 tools registered), but the bridge transport is not yet wired — most FL-API tools throw `BRIDGE_NOT_READY` against `StubBridge` until the L0 probe completes and a real transport (TCP socket or virtual MIDI) lands. Honest functional status: **~14 tools work today** (the L6 `.pyscript` deploys + L7 PyFLP scans + L8b's pure-TS snapshot/diff + `ping`). The other ~96 register correctly and pass schema validation but will reject at the bridge layer until v1.0.
+>
+> A 5-reviewer audit cycle (L1 friendly → L5 pathological, 77 raw findings, ~30 unique after dedup) plus a vendor-script audit of every `bridge.call` (62 vendor-confirmed, 10 docs-only flagged `[unverified]`, 8 invented/rescued) is documented in [docs/AUDIT-CYCLE.md](./docs/AUDIT-CYCLE.md) and `_scratch/flstudio-mcp-research/bridge-contract-audit.md`. The original `v1.0.0` tag is retained for history; `v1.0` proper waits for transport. Run the probe ([docs/L0-PROBE-RUN.md](./docs/L0-PROBE-RUN.md)) to unblock.
 
 ## Architecture
 
@@ -30,11 +32,11 @@ MCP server for FL Studio (Image-Line). Full-spectrum control surface — composi
 
 **Three surfaces:**
 
-| Surface | Tools | Connectivity | Notes |
-|---|---|---|---|
-| **Live bridge** (L1/L2/L4/L5/L8) | ~85 | TCP socket or virtual MIDI into the in-FL device script. Real-time read/mutate over FL's MIDI Controller Scripting API. | Gated on L0 probe selecting transport. Architecture is transport-agnostic at the tool layer. |
-| **PyFLP project intel** (L7) | 8 | Out-of-process Python subprocess. No FL needed. | Reads `.flp` files on disk. PyFLP `pip install --user pyflp` required. |
-| **Piano Roll `.pyscript` dispatch** (L6) | 6 | File deploy to FL scripts dir. User invokes via Ctrl+Alt+Y. | v1.0 ships deploy-only; auto-trigger in v1.1. |
+| Surface                                  | Tools | Connectivity                                                                                                            | Notes                                                                                        |
+| ---------------------------------------- | ----- | ----------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| **Live bridge** (L1/L2/L4/L5/L8)         | ~85   | TCP socket or virtual MIDI into the in-FL device script. Real-time read/mutate over FL's MIDI Controller Scripting API. | Gated on L0 probe selecting transport. Architecture is transport-agnostic at the tool layer. |
+| **PyFLP project intel** (L7)             | 8     | Out-of-process Python subprocess. No FL needed.                                                                         | Reads `.flp` files on disk. PyFLP `pip install --user pyflp` required.                       |
+| **Piano Roll `.pyscript` dispatch** (L6) | 6     | File deploy to FL scripts dir. User invokes via Ctrl+Alt+Y.                                                             | v1.0 ships deploy-only; auto-trigger in v1.1.                                                |
 
 FL Studio 2024 ships Python 3.12.1 (verified) at `Shared\Python\` with the full CPython stdlib in `python312.zip` — `socket`, `threading`, `queue`, `ssl`, `asyncio` all import cleanly inside the embedded interpreter. The widely-cited "3.9 sandbox with threading stripped" community claim is **outdated** for FL 2024.
 
@@ -121,22 +123,22 @@ L6 piano-roll tools generate `.pyscript` files for the user to invoke:
 
 109 tools across 13 modules. Full per-tool scoring with green/yellow caveats in [docs/DOMAIN-MAP.md](./docs/DOMAIN-MAP.md).
 
-| Module | Tools | Notes |
-|---|---|---|
-| **system** | `ping` | Sanity / health |
-| **transport** (live) | `transport_play`, `transport_stop`, `transport_is_playing`, `transport_set_tempo`, `transport_set_loop_mode`, `transport_set_song_pos`, `transport_toggle_metronome`, `transport_tap_tempo`, `transport_record`, `transport_get_song_pos`, `transport_get_song_length` | Play/stop, tempo (direct setter, no REC plumbing), loop, position, metronome, tap-tempo, record arm |
-| **channels** (live) | 15 incl. `channels_count`, `channel_get_*` (name/color/volume/pan/target_fx/type), `channel_set_*` (name/volume/pan/color/target_fx), `channel_select/mute/solo` | 0-indexed channel rack |
-| **channels (step grid)** (live) | 9 incl. `channel_get_step_bit`, `channel_set_step_bit`, `channel_toggle_step`, `channel_get_step_param`, `channel_set_step_param`, `channel_set_step_row`, `channel_clear_pattern_steps`, `channel_step_pattern_build`, `pattern_set_length` | The cleanest composition surface; works fully within FL's hard limits |
-| **mixer** (live) | 18 incl. `mixer_track_count`, `mixer_get_*` (name/color/vol/pan/mute/solo/peaks), `mixer_set_*` (name/vol/pan/color/route/send/eq_gain/eq_freq), `mixer_mute_track`, `mixer_solo_track`, `mixer_arm_track`, `mixer_link_channel_to_track` | 0-indexed (0=Master). Direct setters for send/EQ (not REC plumbing). |
-| **patterns** (live) | 9 incl. `patterns_count`, `patterns_current_number`, `patterns_get_*` (name/color/length), `patterns_select`, `patterns_jump_to`, `patterns_set_*` (name/color) | 1-indexed. Picker selection ≠ playback marker. |
-| **playlist** (live, read-only) | 5 incl. `playlist_track_count`, `playlist_get_track_*` (name/color), `playlist_is_track_muted`, `playlist_get_display_zone` | 1-indexed. No clip CRUD (hard limit — trigger only). |
-| **plugins** (live) | 6 incl. `plugins_get_*` (name/param count/param name/param value), `plugins_set_param` (with `pickupMode` + `useGlobalIndex`), `plugins_change_preset` | Dual addressing: `slotIndex=-1` = channel-rack instrument; ≥0 = mixer effect slot |
-| **general** (live) | 5 incl. `general_get_project_title`, `general_undo`, `general_save_project`, `general_get_changed_flag`, `general_get_rec_ppb`, `general_get_use_metronome` | Save, undo, metadata |
-| **arrangement / ui** (live) | 3: `arrangement_current_time`, `ui_get_visible`, `ui_get_focused_form_id` | Window focus, snap-based time |
-| **live composition** (L8a) | 6 incl. `live_arm_record`, `live_play_note_now`, `live_release_note`, `live_play_chord_now`, `live_stream_notes`, `live_get_record_state` | Real-time note streaming; if FL armed+playing → records; else previews |
-| **state sync** (L8b) | 4: `state_subscribe`, `state_get_changes`, `state_snapshot`, `state_diff_snapshots` | Subscribe via bridge-side flag (not a callback registration). Drain accumulated dirty events. |
-| **piano roll deploy** (L6) | 6: `piano_roll_deploy_add_notes/clear_pattern/transpose/quantize/velocity_set`, `piano_roll_list_deployed` | Generates `.pyscript` files. User invokes via Ctrl+Alt+Y in FL's Piano Roll. |
-| **PyFLP project intel** (L7) | 8: `flp_scan_folder`, `flp_inspect`, `flp_get_plugins`, `flp_get_samples`, `flp_check_missing_samples`, `flp_tempo_distribution`, `flp_plugin_inventory`, `flp_get_pattern_summary` | Out-of-process. PyFLP via subprocess. Independent of FL. |
+| Module                          | Tools                                                                                                                                                                                                                                                                  | Notes                                                                                               |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| **system**                      | `ping`                                                                                                                                                                                                                                                                 | Sanity / health                                                                                     |
+| **transport** (live)            | `transport_play`, `transport_stop`, `transport_is_playing`, `transport_set_tempo`, `transport_set_loop_mode`, `transport_set_song_pos`, `transport_toggle_metronome`, `transport_tap_tempo`, `transport_record`, `transport_get_song_pos`, `transport_get_song_length` | Play/stop, tempo (direct setter, no REC plumbing), loop, position, metronome, tap-tempo, record arm |
+| **channels** (live)             | 15 incl. `channels_count`, `channel_get_*` (name/color/volume/pan/target*fx/type), `channel_set*\*`(name/volume/pan/color/target_fx),`channel_select/mute/solo`                                                                                                        | 0-indexed channel rack                                                                              |
+| **channels (step grid)** (live) | 9 incl. `channel_get_step_bit`, `channel_set_step_bit`, `channel_toggle_step`, `channel_get_step_param`, `channel_set_step_param`, `channel_set_step_row`, `channel_clear_pattern_steps`, `channel_step_pattern_build`, `pattern_set_length`                           | The cleanest composition surface; works fully within FL's hard limits                               |
+| **mixer** (live)                | 18 incl. `mixer_track_count`, `mixer_get_*` (name/color/vol/pan/mute/solo/peaks), `mixer_set_*` (name/vol/pan/color/route/send/eq_gain/eq_freq), `mixer_mute_track`, `mixer_solo_track`, `mixer_arm_track`, `mixer_link_channel_to_track`                              | 0-indexed (0=Master). Direct setters for send/EQ (not REC plumbing).                                |
+| **patterns** (live)             | 9 incl. `patterns_count`, `patterns_current_number`, `patterns_get_*` (name/color/length), `patterns_select`, `patterns_jump_to`, `patterns_set_*` (name/color)                                                                                                        | 1-indexed. Picker selection ≠ playback marker.                                                      |
+| **playlist** (live, read-only)  | 5 incl. `playlist_track_count`, `playlist_get_track_*` (name/color), `playlist_is_track_muted`, `playlist_get_display_zone`                                                                                                                                            | 1-indexed. No clip CRUD (hard limit — trigger only).                                                |
+| **plugins** (live)              | 6 incl. `plugins_get_*` (name/param count/param name/param value), `plugins_set_param` (with `pickupMode` + `useGlobalIndex`), `plugins_change_preset`                                                                                                                 | Dual addressing: `slotIndex=-1` = channel-rack instrument; ≥0 = mixer effect slot                   |
+| **general** (live)              | 5 incl. `general_get_project_title`, `general_undo`, `general_save_project`, `general_get_changed_flag`, `general_get_rec_ppb`, `general_get_use_metronome`                                                                                                            | Save, undo, metadata                                                                                |
+| **arrangement / ui** (live)     | 3: `arrangement_current_time`, `ui_get_visible`, `ui_get_focused_form_id`                                                                                                                                                                                              | Window focus, snap-based time                                                                       |
+| **live composition** (L8a)      | 6 incl. `live_arm_record`, `live_play_note_now`, `live_release_note`, `live_play_chord_now`, `live_stream_notes`, `live_get_record_state`                                                                                                                              | Real-time note streaming; if FL armed+playing → records; else previews                              |
+| **state sync** (L8b)            | 4: `state_subscribe`, `state_get_changes`, `state_snapshot`, `state_diff_snapshots`                                                                                                                                                                                    | Subscribe via bridge-side flag (not a callback registration). Drain accumulated dirty events.       |
+| **piano roll deploy** (L6)      | 6: `piano_roll_deploy_add_notes/clear_pattern/transpose/quantize/velocity_set`, `piano_roll_list_deployed`                                                                                                                                                             | Generates `.pyscript` files. User invokes via Ctrl+Alt+Y in FL's Piano Roll.                        |
+| **PyFLP project intel** (L7)    | 8: `flp_scan_folder`, `flp_inspect`, `flp_get_plugins`, `flp_get_samples`, `flp_check_missing_samples`, `flp_tempo_distribution`, `flp_plugin_inventory`, `flp_get_pattern_summary`                                                                                    | Out-of-process. PyFLP via subprocess. Independent of FL.                                            |
 
 ## Hard limits (architectural walls, not bugs)
 
@@ -186,22 +188,23 @@ npm run format
 
 ## Roadmap
 
-| Milestone | Status | New tools | Cumulative |
-|---|---|---|---|
-| L0 — Foundation probe | ✅ shipped | 0 | 0 |
-| L1 — Bridge foundation | ✅ shipped | 5 | 5 |
-| L2 — Inspection breadth | ✅ shipped | 36 | 41 |
-| L3 — Domain feasibility audit | ✅ shipped | 0 | 41 |
-| L4 — Mutation breadth + critic adds | ✅ shipped | 35 | 76 |
-| L5 — Composition v1 (step grid) | ✅ shipped | 9 | 85 |
-| L8a — Live composition | ✅ shipped | 6 | 91 |
-| L8b — State sync | ✅ shipped | 4 | 95 |
-| L7 — PyFLP project intel | ✅ shipped | 8 | 103 |
-| L6 — Piano Roll `.pyscript` dispatch | ✅ shipped | 6 | 109 |
-| L9 — Polish + v1.0 release | _in progress_ | 0 | 109 |
-| **v1.1+** | _planned_ | — | — |
+| Milestone                            | Status        | New tools | Cumulative |
+| ------------------------------------ | ------------- | --------- | ---------- |
+| L0 — Foundation probe                | ✅ shipped    | 0         | 0          |
+| L1 — Bridge foundation               | ✅ shipped    | 5         | 5          |
+| L2 — Inspection breadth              | ✅ shipped    | 36        | 41         |
+| L3 — Domain feasibility audit        | ✅ shipped    | 0         | 41         |
+| L4 — Mutation breadth + critic adds  | ✅ shipped    | 35        | 76         |
+| L5 — Composition v1 (step grid)      | ✅ shipped    | 9         | 85         |
+| L8a — Live composition               | ✅ shipped    | 6         | 91         |
+| L8b — State sync                     | ✅ shipped    | 4         | 95         |
+| L7 — PyFLP project intel             | ✅ shipped    | 8         | 103        |
+| L6 — Piano Roll `.pyscript` dispatch | ✅ shipped    | 6         | 109        |
+| L9 — Polish + v1.0 release           | _in progress_ | 0         | 109        |
+| **v1.1+**                            | _planned_     | —         | —          |
 
 ### v1.1+ targets
+
 - **Bridge transport implementation** (TCP socket or virtual MIDI, gated on L0 probe results)
 - **State-sync deep snapshot** (loop through every channel/track for full state object)
 - **Piano-roll auto-trigger** (FL Studio Remote API or keystroke automation; user no longer needs Ctrl+Alt+Y)

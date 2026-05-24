@@ -12,7 +12,8 @@ export function registerPatternsTools(server: McpServer, bridge: Bridge): void {
   server.registerTool(
     "patterns_count",
     {
-      description: "Return the number of patterns the user has touched in the project (occupied patterns; not the maximum index).",
+      description:
+        "Return the number of patterns the user has touched in the project (occupied patterns; not the maximum index).",
       inputSchema: {},
     },
     async () => jsonResult(await bridge.call("patterns.patternCount")),
@@ -70,8 +71,20 @@ export function registerPatternsTools(server: McpServer, bridge: Bridge): void {
         "Set the Picker-panel selection state of the pattern at the given index. NOTE: this affects PICKER selection only — it does NOT move the playback marker (red arrow). Use patterns_jump_to to set the playback pattern. The two concepts can diverge when the user clicks one pattern but plays another. Patterns are 1-indexed.",
       inputSchema: {
         index: z.number().int().min(1).describe("Pattern index (1-based)"),
-        value: z.number().int().min(-1).max(1).default(-1).describe("-1=toggle, 0=deselect, 1=select"),
-        preview: z.number().int().min(0).max(1).default(0).describe("If 1, preview the pattern audibly when selecting"),
+        value: z
+          .number()
+          .int()
+          .min(-1)
+          .max(1)
+          .default(-1)
+          .describe("-1=toggle, 0=deselect, 1=select"),
+        preview: z
+          .number()
+          .int()
+          .min(0)
+          .max(1)
+          .default(0)
+          .describe("If 1, preview the pattern audibly when selecting"),
       },
     },
     async ({ index, value, preview }) =>
@@ -99,7 +112,8 @@ export function registerPatternsTools(server: McpServer, bridge: Bridge): void {
         name: z.string().min(1).max(64).describe("New pattern name (1-64 chars)"),
       },
     },
-    async ({ index, name }) => jsonResult(await bridge.call("patterns.setPatternName", { index, name })),
+    async ({ index, name }) =>
+      jsonResult(await bridge.call("patterns.setPatternName", { index, name })),
   );
 
   server.registerTool(
@@ -112,6 +126,7 @@ export function registerPatternsTools(server: McpServer, bridge: Bridge): void {
         color: z.number().int().describe("32-bit BGRA little-endian"),
       },
     },
-    async ({ index, color }) => jsonResult(await bridge.call("patterns.setPatternColor", { index, color })),
+    async ({ index, color }) =>
+      jsonResult(await bridge.call("patterns.setPatternColor", { index, color })),
   );
 }

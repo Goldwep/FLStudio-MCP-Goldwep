@@ -17,8 +17,15 @@ import { fileURLToPath } from "node:url";
 import { BridgeError } from "../bridge/index.js";
 import { logger } from "../utils/logger.js";
 
-const DEFAULT_PYTHON =
-  "C:\\Users\\Nathan\\AppData\\Local\\Programs\\Python\\Python313\\python.exe";
+// We do NOT hardcode a per-developer Python path. The PATH-resolved "python"
+// covers any user with a properly-installed CPython 3.10+. Users who need
+// a specific interpreter (FL's bundled Python, a venv, etc.) set
+// FLSTUDIO_MCP_PYTHON. On Windows where "python" sometimes resolves to the
+// Microsoft Store stub, "py" is a documented fallback shipped by the
+// official installer — we try it if "python" isn't usable. (The runner
+// doesn't probe PATH at module-load time — the OS does the probe on every
+// spawn, so a transient PATH change is honored.)
+const DEFAULT_PYTHON = process.platform === "win32" ? "python" : "python3";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -161,10 +168,9 @@ export function runPyflp(
         if (!envelope.ok) {
           const hint = envelope.hint ? ` Hint: ${envelope.hint}` : "";
           rejectP(
-            new BridgeError(
-              `PyFLP helper error: ${envelope.error ?? "<unknown>"}.${hint}`,
-              { code: "PYFLP_ACTION_FAILED" },
-            ),
+            new BridgeError(`PyFLP helper error: ${envelope.error ?? "<unknown>"}.${hint}`, {
+              code: "PYFLP_ACTION_FAILED",
+            }),
           );
           return;
         }

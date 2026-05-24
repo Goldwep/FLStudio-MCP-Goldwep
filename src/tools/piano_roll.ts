@@ -9,11 +9,7 @@ import {
   generateQuantize,
   generateVelocitySet,
 } from "../pyscript/generator.js";
-import {
-  deployPyscript,
-  listDeployedScripts,
-  resolveScriptsDir,
-} from "../pyscript/deployer.js";
+import { deployPyscript, listDeployedScripts, resolveScriptsDir } from "../pyscript/deployer.js";
 
 // L6 — Piano Roll `.pyscript` dispatch (v1.0: deploy-only).
 //
@@ -38,41 +34,25 @@ const scriptNameSchema = z
   .min(1)
   .max(64)
   .optional()
-  .describe(
-    "Output .pyscript filename without extension. Auto-generated if omitted.",
-  );
+  .describe("Output .pyscript filename without extension. Auto-generated if omitted.");
 
 const noteEntrySchema = z.object({
-  pitch: z
-    .number()
-    .int()
-    .min(0)
-    .max(127)
-    .describe("MIDI pitch 0..127 (60=C4)"),
+  pitch: z.number().int().min(0).max(127).describe("MIDI pitch 0..127 (60=C4)"),
   position: z
     .number()
     .int()
     .min(0)
     .describe("Note start in ticks (PPQ-based; FL piano-roll PPQ=96)"),
-  length: z
-    .number()
-    .int()
-    .min(1)
-    .describe("Note length in ticks (PPQ=96, so 96 = quarter note)"),
+  length: z.number().int().min(1).describe("Note length in ticks (PPQ=96, so 96 = quarter note)"),
   velocity: z
     .number()
     .int()
     .min(1)
     .max(127)
-    .describe(
-      "MIDI velocity 1..127. Generator converts to flpianoroll's 0.0..1.0 float.",
-    ),
+    .describe("MIDI velocity 1..127. Generator converts to flpianoroll's 0.0..1.0 float."),
 });
 
-export function registerPianoRollTools(
-  server: McpServer,
-  _bridge: Bridge,
-): void {
+export function registerPianoRollTools(server: McpServer, _bridge: Bridge): void {
   // Suppress unused-arg lint without changing the public signature.
   void _bridge;
 
@@ -82,11 +62,7 @@ export function registerPianoRollTools(
       description:
         "DEPLOYS a `.pyscript` file that adds notes to the current piano-roll pattern. You must invoke it manually from FL Studio's Piano Roll (Ctrl+Alt+Y) to apply. Notes are tuples of {pitch (MIDI 0..127), position (ticks; FL PPQ=96), length (ticks), velocity (MIDI 1..127 — generator converts to flpianoroll's 0.0..1.0 float)}. Returns the deployed file path.",
       inputSchema: {
-        notes: z
-          .array(noteEntrySchema)
-          .min(1)
-          .max(1000)
-          .describe("Up to 1000 notes per dispatch."),
+        notes: z.array(noteEntrySchema).min(1).max(1000).describe("Up to 1000 notes per dispatch."),
         script_name: scriptNameSchema,
       },
     },
@@ -108,11 +84,7 @@ export function registerPianoRollTools(
     },
     async ({ script_name }) => {
       const source = generateClearPattern();
-      const result = await deployPyscript(
-        source,
-        script_name,
-        "clear_pattern",
-      );
+      const result = await deployPyscript(source, script_name, "clear_pattern");
       return jsonResult(result);
     },
   );
@@ -173,22 +145,13 @@ export function registerPianoRollTools(
       description:
         "DEPLOYS a `.pyscript` file that sets every note in the current piano-roll pattern to a single velocity. Velocity is MIDI 1..127 at the tool boundary; the generated script converts to flpianoroll's 0.0..1.0 float. You must invoke it manually from FL Studio's Piano Roll (Ctrl+Alt+Y) to apply.",
       inputSchema: {
-        velocity: z
-          .number()
-          .int()
-          .min(1)
-          .max(127)
-          .describe("Target MIDI velocity 1..127."),
+        velocity: z.number().int().min(1).max(127).describe("Target MIDI velocity 1..127."),
         script_name: scriptNameSchema,
       },
     },
     async ({ velocity, script_name }) => {
       const source = generateVelocitySet(velocity);
-      const result = await deployPyscript(
-        source,
-        script_name,
-        "velocity_set",
-      );
+      const result = await deployPyscript(source, script_name, "velocity_set");
       return jsonResult(result);
     },
   );

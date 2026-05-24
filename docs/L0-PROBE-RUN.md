@@ -7,15 +7,15 @@
 
 Answers 7 architectural questions empirically by running inside FL Studio's MIDI scripting environment for ~20 seconds. Outputs `probe_results.json` next to the script. Read-only on your project (Q2 may crash FL — see Risks below).
 
-| Q | What it tests | Why it matters |
-|---|---|---|
-| Q1 | `threading.Thread` survives FL embedding | Decides socket bridge vs virtual MIDI |
-| Q2 | Cross-thread FL API call | Decides queue-and-drain vs direct-call |
-| Q3 | `processRECEvent(REC_Chan_NoteOn,...)` accepted | **HIGHEST LEVERAGE** — if yes, L6 collapses into L5 |
-| Q4 | `OnDeInit` fires on Reload Script | Affects socket cleanup design |
-| Q5 | `OnIdle` cadence p50/p99 | Sets per-request timeout |
-| Q6 | Worker-thread `print()` reaches Script Output | Decides logging architecture |
-| Q7 | `OnUpdateLiveDisplay` vs `OnUpdateLiveMode` | Callback count for plan-doc accuracy |
+| Q   | What it tests                                   | Why it matters                                      |
+| --- | ----------------------------------------------- | --------------------------------------------------- |
+| Q1  | `threading.Thread` survives FL embedding        | Decides socket bridge vs virtual MIDI               |
+| Q2  | Cross-thread FL API call                        | Decides queue-and-drain vs direct-call              |
+| Q3  | `processRECEvent(REC_Chan_NoteOn,...)` accepted | **HIGHEST LEVERAGE** — if yes, L6 collapses into L5 |
+| Q4  | `OnDeInit` fires on Reload Script               | Affects socket cleanup design                       |
+| Q5  | `OnIdle` cadence p50/p99                        | Sets per-request timeout                            |
+| Q6  | Worker-thread `print()` reaches Script Output   | Decides logging architecture                        |
+| Q7  | `OnUpdateLiveDisplay` vs `OnUpdateLiveMode`     | Callback count for plan-doc accuracy                |
 
 ## How to run (manual, ~2 minutes)
 
@@ -44,6 +44,7 @@ Answers 7 architectural questions empirically by running inside FL Studio's MIDI
 ## When you're done
 
 Either:
+
 - **Tell Claude "probe done"** — Claude reads the JSON, synthesizes `docs/PROBE-REPORT.md`, locks architecture, continues to L1.
 - **Or just let it run** — Claude continues against best-evidence defaults; reconciles when probe data lands.
 

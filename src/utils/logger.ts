@@ -1,7 +1,8 @@
 type Level = "debug" | "info" | "warn" | "error";
 
 function emit(level: Level, msg: string, meta?: unknown): void {
-  const line = meta === undefined ? `[${level}] ${msg}` : `[${level}] ${msg} ${JSON.stringify(meta)}`;
+  const line =
+    meta === undefined ? `[${level}] ${msg}` : `[${level}] ${msg} ${JSON.stringify(meta)}`;
   process.stderr.write(line + "\n");
 }
 

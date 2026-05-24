@@ -127,7 +127,13 @@ export function registerChannelsStepsTools(server: McpServer, bridge: Bridge): v
     async ({ index, pattern, step, param, value }) => {
       await bridge.call("channels.setGridBit", { index, position: step, value: 1 });
       return jsonResult(
-        await bridge.call("channels.setStepParameterByIndex", { index, pattern, step, param, value }),
+        await bridge.call("channels.setStepParameterByIndex", {
+          index,
+          pattern,
+          step,
+          param,
+          value,
+        }),
       );
     },
   );

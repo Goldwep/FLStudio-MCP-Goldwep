@@ -10,10 +10,9 @@ export class StubBridge implements Bridge {
     if (method === "ping") {
       return { pong: true, ts: Date.now() };
     }
-    throw new BridgeError(
-      "L0 probe pending — bridge transport not yet selected",
-      { code: "BRIDGE_NOT_READY" },
-    );
+    throw new BridgeError("L0 probe pending — bridge transport not yet selected", {
+      code: "BRIDGE_NOT_READY",
+    });
   }
 
   isConnected(): boolean {

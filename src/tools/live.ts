@@ -18,14 +18,14 @@ const channelIndexSchema = z
   .number()
   .int()
   .min(0)
-  .describe("Channel rack index (0-based)");
+  .describe(
+    "Channel rack index (0-based, PROJECT-GLOBAL). channels.midiNoteOn addresses " +
+      "the project-global channel space — if your project has channel groups, " +
+      "this index does NOT match the visible group-relative position. Pass the " +
+      "global index. Use channels_count for the upper bound.",
+  );
 
-const noteSchema = z
-  .number()
-  .int()
-  .min(0)
-  .max(127)
-  .describe("MIDI note 0..127 (60=C4)");
+const noteSchema = z.number().int().min(0).max(127).describe("MIDI note 0..127 (60=C4)");
 
 const velocitySchema = z
   .number()
@@ -43,15 +43,10 @@ const midiChannelSchema = z
   .describe("MIDI channel 0..15; -1 = global (channels.midiNoteOn convention)");
 
 export function registerLiveTools(server: McpServer, bridge: Bridge): void {
-  server.registerTool(
-    "live_arm_record",
-    {
-      description:
-        "Toggle FL Studio's record arm. Idempotent if FL is already armed (same toggle as transport_record). Pair with transport_play to begin actually recording.",
-      inputSchema: {},
-    },
-    async () => jsonResult(await bridge.call("transport.record")),
-  );
+  // NOTE: live_arm_record was removed in v0.9.1-pre-bridge — it was a
+  // functional duplicate of transport_record (same bridge.call), and worse,
+  // its description claimed "idempotent" when the underlying call is a
+  // toggle. Use transport_record for arm/disarm.
 
   server.registerTool(
     "live_get_record_state",
@@ -154,29 +149,51 @@ export function registerLiveTools(server: McpServer, bridge: Bridge): void {
           )
           .min(1)
           .max(256)
-          .describe(
-            "Note sequence with per-note hold duration (best-effort timing)",
-          ),
+          .describe("Note sequence with per-note hold duration (best-effort timing)"),
         midi_channel: midiChannelSchema,
       },
     },
     async ({ channel_index, sequence, midi_channel }) => {
-      for (const item of sequence) {
-        await bridge.call("channels.midiNoteOn", {
-          channel_index,
-          note: item.note,
-          velocity: item.velocity,
-          midi_channel,
-        });
-        await new Promise((r) => setTimeout(r, item.hold_ms));
-        await bridge.call("channels.midiNoteOn", {
-          channel_index,
-          note: item.note,
-          velocity: 0,
-          midi_channel,
-        });
+      // Track currently-held notes so we can flush note-off for any of them
+      // if a mid-stream bridge.call rejects. Without this, a failure leaves
+      // a stuck note ringing in FL indefinitely.
+      const held = new Set<number>();
+      try {
+        for (const item of sequence) {
+          await bridge.call("channels.midiNoteOn", {
+            channel_index,
+            note: item.note,
+            velocity: item.velocity,
+            midi_channel,
+          });
+          held.add(item.note);
+          await new Promise((r) => setTimeout(r, item.hold_ms));
+          await bridge.call("channels.midiNoteOn", {
+            channel_index,
+            note: item.note,
+            velocity: 0,
+            midi_channel,
+          });
+          held.delete(item.note);
+        }
+        return jsonResult({ ok: true, played: sequence.length });
+      } finally {
+        // Best-effort cleanup — release any note still on. Each release
+        // can fail independently; we don't want one cleanup failure to
+        // mask the original error.
+        for (const note of held) {
+          try {
+            await bridge.call("channels.midiNoteOn", {
+              channel_index,
+              note,
+              velocity: 0,
+              midi_channel,
+            });
+          } catch {
+            // swallow — original throw (or normal return) takes precedence
+          }
+        }
       }
-      return jsonResult({ ok: true, played: sequence.length });
     },
   );
 }

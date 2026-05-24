@@ -21,20 +21,14 @@ const indexSchema = z
   .number()
   .int()
   .min(0)
-  .describe(
-    "Channel rack index (when slotIndex=-1) or mixer track index (when slotIndex>=0)",
-  );
+  .describe("Channel rack index (when slotIndex=-1) or mixer track index (when slotIndex>=0)");
 
 const slotIndexSchema = z
   .number()
   .int()
   .describe("-1 = channel-rack instrument; 0..N = mixer effect slot");
 
-const paramIndexSchema = z
-  .number()
-  .int()
-  .min(0)
-  .describe("Plugin parameter index (0-based)");
+const paramIndexSchema = z.number().int().min(0).describe("Plugin parameter index (0-based)");
 
 export function registerPluginsTools(server: McpServer, bridge: Bridge): void {
   server.registerTool(
@@ -48,9 +42,7 @@ export function registerPluginsTools(server: McpServer, bridge: Bridge): void {
       },
     },
     async ({ index, slotIndex }) =>
-      jsonResult(
-        await bridge.call("plugins.getPluginName", { index, slotIndex }),
-      ),
+      jsonResult(await bridge.call("plugins.getPluginName", { index, slotIndex })),
   );
 
   server.registerTool(
@@ -64,9 +56,7 @@ export function registerPluginsTools(server: McpServer, bridge: Bridge): void {
       },
     },
     async ({ index, slotIndex }) =>
-      jsonResult(
-        await bridge.call("plugins.getParamCount", { index, slotIndex }),
-      ),
+      jsonResult(await bridge.call("plugins.getParamCount", { index, slotIndex })),
   );
 
   server.registerTool(
@@ -121,9 +111,7 @@ export function registerPluginsTools(server: McpServer, bridge: Bridge): void {
           .number()
           .min(0)
           .max(1)
-          .describe(
-            "Normalized 0..1 (docs say int but actual is float per research)",
-          ),
+          .describe("Normalized 0..1 (docs say int but actual is float per research)"),
         paramIndex: paramIndexSchema,
         index: indexSchema,
         slotIndex: slotIndexSchema,
@@ -157,23 +145,46 @@ export function registerPluginsTools(server: McpServer, bridge: Bridge): void {
       ),
   );
 
+  // Vendor-confirmed preset stepping uses two distinct FL API calls:
+  //   plugins.nextPreset(channel)  — heavy use in Arturia/Novation/NI scripts
+  //   plugins.prevPreset(channel)  — same
+  // There is no FL API for "change preset by index" or a generic "changePreset"
+  // method. The previous combined `plugins_change_preset` was a bridge-side
+  // invention; replacing it with two thin tools that map 1:1 to vendor calls.
   server.registerTool(
-    "plugins_change_preset",
+    "plugins_next_preset",
     {
       description:
-        "Step a plugin's preset forward (next) or backward (prev). Dual addressing: slotIndex=-1 targets the channel-rack instrument at channel `index`; slotIndex>=0 targets the effect at mixer track `index`, slot `slotIndex`. Third-party VSTs may no-op if their wrapper does not expose preset banks (Arturia gates this on a known-controllable plugin list).",
+        "Step the plugin's preset forward by one. Dual addressing: slotIndex=-1 targets the channel-rack instrument at channel `index`; slotIndex>=0 targets the effect at mixer track `index`, slot `slotIndex`. Third-party VSTs may no-op if their wrapper does not expose preset banks (Arturia gates this on a known-controllable plugin list).",
       inputSchema: {
         index: indexSchema,
         slotIndex: slotIndexSchema,
-        direction: z.enum(["next", "prev"]),
       },
     },
-    async ({ index, slotIndex, direction }) =>
+    async ({ index, slotIndex }) =>
       jsonResult(
-        await bridge.call("plugins.changePreset", {
+        await bridge.call("plugins.nextPreset", {
           index,
           slotIndex,
-          direction,
+        }),
+      ),
+  );
+
+  server.registerTool(
+    "plugins_prev_preset",
+    {
+      description:
+        "Step the plugin's preset backward by one. Same addressing + plugin-coverage caveats as plugins_next_preset.",
+      inputSchema: {
+        index: indexSchema,
+        slotIndex: slotIndexSchema,
+      },
+    },
+    async ({ index, slotIndex }) =>
+      jsonResult(
+        await bridge.call("plugins.prevPreset", {
+          index,
+          slotIndex,
         }),
       ),
   );

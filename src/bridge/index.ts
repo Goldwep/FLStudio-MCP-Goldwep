@@ -13,9 +13,7 @@ export { StubBridge } from "./stub.js";
 export function makeBridge(config: Config): Bridge {
   const mode = config.bridge.mode;
   if (mode !== "stub") {
-    logger.warn(
-      `bridge mode "${mode}" not yet implemented — falling back to stub`,
-    );
+    logger.warn(`bridge mode "${mode}" not yet implemented — falling back to stub`);
   }
   return new StubBridge();
 }

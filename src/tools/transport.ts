@@ -40,13 +40,9 @@ export function registerTransportTools(server: McpServer, bridge: Bridge): void 
     "transport_set_tempo",
     {
       description:
-        "Set the FL Studio project tempo in BPM. Uses the direct setter mixer.setCurrentTempo (not REC plumbing) — the absolute path. For relative nudges (encoder jog), use a future transport_nudge_tempo tool.",
+        "[UNVERIFIED — pending probe] Set the FL Studio project tempo in BPM. Uses mixer.setCurrentTempo, which is listed in the online manual but has ZERO precedent in any of the 14 bundled vendor controller scripts. Vendor pattern for tempo is encoder-delta via REC_Tempo (general.processRECEvent), not an absolute setter. May AttributeError when the bridge lands until probe confirms the absolute setter exists.",
       inputSchema: {
-        bpm: z
-          .number()
-          .min(10)
-          .max(999)
-          .describe("Tempo in BPM (absolute value)."),
+        bpm: z.number().min(10).max(999).describe("Tempo in BPM (absolute value)."),
       },
     },
     async ({ bpm }) => jsonResult(await bridge.call("mixer.setCurrentTempo", { bpm })),
@@ -56,7 +52,7 @@ export function registerTransportTools(server: McpServer, bridge: Bridge): void 
     "transport_toggle_metronome",
     {
       description:
-        "Toggle the FL Studio metronome on/off. Bridge translates to transport.globalTransport(FPT_Metronome, 1). No args.",
+        "Toggle the FL Studio metronome on/off. Bridge-side composite: translates to vendor-confirmed transport.globalTransport(midi.FPT_Metronome, 1, pmeFlags) — pattern from device_Fire.py:1893, KLEss3Process.py:536, device_SSL.py:430. No args.",
       inputSchema: {},
     },
     async () => jsonResult(await bridge.call("transport.toggleMetronome")),
@@ -66,7 +62,7 @@ export function registerTransportTools(server: McpServer, bridge: Bridge): void 
     "transport_tap_tempo",
     {
       description:
-        "Send a tap-tempo pulse. Repeated calls converge FL on the tapped tempo. Bridge translates to transport.globalTransport(FPT_TapTempo, 1). No args.",
+        "Send a tap-tempo pulse. Repeated calls converge FL on the tapped tempo. Bridge-side composite: translates to vendor-confirmed transport.globalTransport(midi.FPT_TapTempo, 1, pmeFlags) — pattern from device_Fire.py:1966, KeyLabEssProcess.py:448. No args.",
       inputSchema: {},
     },
     async () => jsonResult(await bridge.call("transport.tapTempo")),
@@ -98,7 +94,11 @@ export function registerTransportTools(server: McpServer, bridge: Bridge): void 
       description:
         "Set the current song position. `position` is interpreted in the unit given by `mode` (SONGLENGTH_* enum). Default mode is 2 (AbsTicks).",
       inputSchema: {
-        position: z.number().int().min(0).describe("Target song position in the unit specified by `mode`."),
+        position: z
+          .number()
+          .int()
+          .min(0)
+          .describe("Target song position in the unit specified by `mode`."),
         mode: z
           .number()
           .int()

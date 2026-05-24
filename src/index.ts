@@ -10,7 +10,7 @@ const config = loadConfig();
 
 const server = new McpServer({
   name: "flstudio-mcp",
-  version: "1.0.0",
+  version: "0.9.1-pre-bridge",
 });
 
 registerTools(server, config);

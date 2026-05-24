@@ -30,7 +30,7 @@ export function registerUiTools(server: McpServer, bridge: Bridge): void {
     "ui_get_focused_form_id",
     {
       description:
-        "Return the FL form/window ID currently focused (integer). Returns -1 when no focusable form is active. Useful for discovering which plugin/editor has keyboard focus.",
+        "[UNVERIFIED — manual-only] Return the FL form/window ID currently focused (integer). Returns -1 when no focusable form is active. ui.getFocusedFormID is documented but has no vendor-script use; pair-tool ui_get_visible IS vendor-confirmed.",
       inputSchema: {},
     },
     async () => jsonResult(await bridge.call("ui.getFocusedFormID")),

@@ -12,7 +12,7 @@ export function registerGeneralExtraTools(server: McpServer, bridge: Bridge): vo
     "general_get_rec_ppb",
     {
       description:
-        "Get the project's pulses-per-beat (PPB = timebase x numerator). Returns an integer tick count per beat. Distinct from PPQ (pulses-per-quarter-note).",
+        "[UNVERIFIED — manual-only] Get the project's pulses-per-beat (PPB = timebase x numerator). general.getRecPPB is documented but vendor scripts uniformly use the sibling general.getRecPPQ instead. May not be present in current FL builds; consider getRecPPQ as a fallback.",
       inputSchema: {},
     },
     async () => jsonResult(await bridge.call("general.getRecPPB")),
