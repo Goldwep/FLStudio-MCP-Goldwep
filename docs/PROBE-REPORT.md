@@ -4,13 +4,13 @@
 
 ## 0. Environment
 
-| Field | Value |
-|---|---|
-| FL Studio version | Producer Edition v24.2.2 [build 4597] |
-| Python | 3.12.1 (tags/v3.12.1, MSC v.1937 64-bit AMD64) |
-| FL MIDI Scripting API | version 37 |
-| Script path | `Settings\Hardware\FLStudio-MCP-Probe\device_FLStudioMCP_Probe.py` |
-| Probe run completed | 2026-05-23 (~T+12s elapsed across reloads) |
+| Field                 | Value                                                              |
+| --------------------- | ------------------------------------------------------------------ |
+| FL Studio version     | Producer Edition v24.2.2 [build 4597]                              |
+| Python                | 3.12.1 (tags/v3.12.1, MSC v.1937 64-bit AMD64)                     |
+| FL MIDI Scripting API | version 37                                                         |
+| Script path           | `Settings\Hardware\FLStudio-MCP-Probe\device_FLStudioMCP_Probe.py` |
+| Probe run completed   | 2026-05-23 (~T+12s elapsed across reloads)                         |
 
 ## 1. Empirical results
 
@@ -27,13 +27,13 @@ FL's embedded Python runs as a **sub-interpreter** with daemon-thread spawning *
 
 **Workarounds considered:**
 
-| Approach | Viability | Notes |
-|---|---|---|
-| `daemon=False` thread | Possible | Thread survives script-unload — must be killed explicitly. FL's no-OnDeInit-on-reload (Q4) makes cleanup fragile. |
+| Approach                                               | Viability          | Notes                                                                                                             |
+| ------------------------------------------------------ | ------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| `daemon=False` thread                                  | Possible           | Thread survives script-unload — must be killed explicitly. FL's no-OnDeInit-on-reload (Q4) makes cleanup fragile. |
 | Single-threaded non-blocking socket polled from OnIdle | ✅ **RECOMMENDED** | No threads. `socket.accept(timeout=0)` polled in OnIdle (~50ms p50). Single-threaded = no thread-safety concerns. |
-| asyncio event loop inside OnIdle | Risky | Mixing asyncio with FL's callback loop is fragile. Skip. |
-| Fall back to virtual MIDI (Flapi pattern) | Backup | If non-blocking socket has issues, virtual MIDI loopback (already needed for L0 anyway) is the fallback. |
-| FL Studio Remote API | Untested | Third Python surface; no community MCP uses it. Worth a future spike but not v1.0 path. |
+| asyncio event loop inside OnIdle                       | Risky              | Mixing asyncio with FL's callback loop is fragile. Skip.                                                          |
+| Fall back to virtual MIDI (Flapi pattern)              | Backup             | If non-blocking socket has issues, virtual MIDI loopback (already needed for L0 anyway) is the fallback.          |
+| FL Studio Remote API                                   | Untested           | Third Python surface; no community MCP uses it. Worth a future spike but not v1.0 path.                           |
 
 **Lock:** **Single-threaded non-blocking socket polled from OnIdle.** Simpler than the original threaded design.
 
@@ -57,6 +57,7 @@ post_call_observed_alive: true
 The call accepted without exception. FL did not crash. **This is the highest-leverage finding — it means real-time piano-roll note CRUD via REC events is at minimum architecturally permitted.**
 
 **Caveat — what we DON'T know yet:**
+
 - Whether the note actually landed in the pattern (no enumeration API to verify from a probe).
 - Whether the value-encoding (pitch<<8 | velocity) is correct.
 - Whether note position / length / channel can be encoded into the same REC space.
@@ -80,6 +81,7 @@ Probe log shows **3 OnInit fires, 0 OnDeInit fires**:
 Reload Script triggers a fresh OnInit but never fires OnDeInit on the previous instance. The "Reload script" button effectively does `exec()` again without teardown.
 
 **Implication:** Socket cleanup CANNOT rely on OnDeInit. Use:
+
 - `SO_REUSEADDR` + force-close any pre-existing socket on `OnInit`
 - Store the socket on a module-level singleton; check + close on init
 - Same pattern works for any global state needing teardown
@@ -88,17 +90,18 @@ Reload Script triggers a fresh OnInit but never fires OnDeInit on the previous i
 
 200 samples observed:
 
-| Metric | Value |
-|---|---|
-| min | 44.5 ms |
-| p50 | **50.0 ms** |
-| p90 | 51.0 ms |
-| p99 | **85.6 ms** |
-| max | 89.8 ms |
+| Metric | Value       |
+| ------ | ----------- |
+| min    | 44.5 ms     |
+| p50    | **50.0 ms** |
+| p90    | 51.0 ms     |
+| p99    | **85.6 ms** |
+| max    | 89.8 ms     |
 
 **The il-group/image-line docs claim "roughly every 20 ms".** Reality on this FL build is **2.5× slower**. Two outlier spikes to ~85-90ms suggest GC pauses or audio-engine contention.
 
 **Implications:**
+
 - Per-request bridge timeout: target **500-1000ms** (10× p99), not the 200ms the original plan assumed.
 - Max throughput: ~20 requests/sec sustained (1000ms / 50ms). For burst tools (state_snapshot composite, channel_step_pattern_build), batch up the requested actions to fit in one OnIdle tick.
 - LLM tool latency budget: each MCP tool call costs at minimum 50ms p50 + 100ms p99 round-trip through the bridge.
@@ -129,25 +132,27 @@ Confirmed by `probe_results.json.tmp` existing on disk but `probe_results.json` 
 
 ## 3. Architecture decisions locked
 
-| Decision | Locked? | Rationale |
-|---|---|---|
-| Transport: TCP socket primary, virtual MIDI fallback | ✅ Yes | Q1 forces non-threaded design; non-blocking socket is the cleanest path. Virtual MIDI remains the fallback if non-blocking socket has runtime issues. |
-| Dispatch: **single-threaded, non-blocking socket polled from OnIdle** | ✅ Yes | Q1 + Q5 combined dictate this. No threads, no queues, no GIL drama. |
-| Note CRUD: **try REC-event path first** | ✅ Yes | Q3 = accepted. Build `live_record_note` tool using `general.processRECEvent` with `REC_Chan_NoteOn` encoding. Probe-2 confirms actual landing. L6 `.pyscript` deploy stays as fallback. |
-| Socket cleanup: SO_REUSEADDR + force-close in OnInit | ✅ Yes | Q4 = OnDeInit unreliable. Defensive cleanup at every init. |
-| Per-request timeout: **750ms** | ✅ Yes | 10× Q5 p99 (86ms × 10 = ~860ms), rounded down. Tight enough to surface stalls; loose enough to absorb the 90ms outliers. |
-| File I/O: **direct write, no atomic-rename** | ✅ Yes | Bonus finding. `os.replace` broken in FL's embedded Python. Ring-buffer pattern for any state that needs crash-resilience. |
-| Logging: file handler next to device script | ✅ Yes | Defensive regardless of Q6 outcome. Main-thread `print()` works fine for the in-bridge case (we're single-threaded now). |
-| State sync (`OnDirty*` callbacks): keep design as-is | ✅ Yes | L3 critic's correction stands — callbacks are module-level functions whose effect is gated by a script-state flag. Q4 unreliability doesn't affect this. |
+| Decision                                                              | Locked? | Rationale                                                                                                                                                                               |
+| --------------------------------------------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Transport: TCP socket primary, virtual MIDI fallback                  | ✅ Yes  | Q1 forces non-threaded design; non-blocking socket is the cleanest path. Virtual MIDI remains the fallback if non-blocking socket has runtime issues.                                   |
+| Dispatch: **single-threaded, non-blocking socket polled from OnIdle** | ✅ Yes  | Q1 + Q5 combined dictate this. No threads, no queues, no GIL drama.                                                                                                                     |
+| Note CRUD: **try REC-event path first**                               | ✅ Yes  | Q3 = accepted. Build `live_record_note` tool using `general.processRECEvent` with `REC_Chan_NoteOn` encoding. Probe-2 confirms actual landing. L6 `.pyscript` deploy stays as fallback. |
+| Socket cleanup: SO_REUSEADDR + force-close in OnInit                  | ✅ Yes  | Q4 = OnDeInit unreliable. Defensive cleanup at every init.                                                                                                                              |
+| Per-request timeout: **750ms**                                        | ✅ Yes  | 10× Q5 p99 (86ms × 10 = ~860ms), rounded down. Tight enough to surface stalls; loose enough to absorb the 90ms outliers.                                                                |
+| File I/O: **direct write, no atomic-rename**                          | ✅ Yes  | Bonus finding. `os.replace` broken in FL's embedded Python. Ring-buffer pattern for any state that needs crash-resilience.                                                              |
+| Logging: file handler next to device script                           | ✅ Yes  | Defensive regardless of Q6 outcome. Main-thread `print()` works fine for the in-bridge case (we're single-threaded now).                                                                |
+| State sync (`OnDirty*` callbacks): keep design as-is                  | ✅ Yes  | L3 critic's correction stands — callbacks are module-level functions whose effect is gated by a script-state flag. Q4 unreliability doesn't affect this.                                |
 
 ## 4. Plan adjustments
 
 ### L6 piano-roll dispatch
+
 - **Demote to v1.1 fallback** — the 6 `.pyscript` deploy tools stay but become the "manual-trigger" path.
 - **Add new tools** under L8a-extended for REC-based note CRUD: `live_record_note`, `live_record_chord`, `pattern_record_notes` (composite). Each uses `general.processRECEvent` with REC_Chan_NoteOn encoding.
 - Probe-2 needed to confirm actual landing: write a probe that issues a REC noteOn, calls `general.saveProject`, then PyFLP-parses the saved .flp to confirm the note exists.
 
 ### Bridge transport (the v1.0 unlock)
+
 - Implement `bridge/device_FLStudioMCP.py` as a single-threaded non-blocking socket server polled from OnIdle.
 - Implement `src/bridge/socket.ts` (Node side) replacing StubBridge.
 - Skeleton (FL side):
@@ -189,6 +194,7 @@ Confirmed by `probe_results.json.tmp` existing on disk but `probe_results.json` 
 - Estimated effort with this architecture: **4-6 days** instead of the 1-2 weeks the threaded design implied.
 
 ### v1.0 release criteria
+
 1. Single-threaded socket bridge live in `bridge/device_FLStudioMCP.py` ✅ designed above
 2. Node `SocketBridge` replaces `StubBridge` for `mode: "socket"` ✅
 3. Round-trip test passes — call `channels_count` from MCP, get a number ✅
