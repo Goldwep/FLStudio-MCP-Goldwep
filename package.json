@@ -1,6 +1,6 @@
 {
   "name": "flstudio-mcp-goldwep",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "module",
   "description": "MCP server for FL Studio (Image-Line) — full-spectrum composition and project inspection over a localhost socket bridge into FL Studio's bundled Python scripting environment.",
   "author": "goldwep",
