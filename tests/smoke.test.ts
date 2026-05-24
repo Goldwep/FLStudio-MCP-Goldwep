@@ -6,7 +6,7 @@
 // structural twin of the one in scripts/smoke.ts.
 
 import { describe, it, expect } from "vitest";
-import { loadConfig } from "../src/config.js";
+import type { Config } from "../src/config.js";
 import { registerTools } from "../src/server.js";
 import { generateAddNotes } from "../src/pyscript/generator.js";
 
@@ -38,7 +38,18 @@ class MockMcpServer {
 }
 
 describe("smoke: tool registration graph", () => {
-  const config = loadConfig();
+  // Force stub mode so the ping handler doesn't dial 127.0.0.1:9876 — this
+  // is a unit smoke against the wiring graph, not a real-FL integration test.
+  // Real-FL is covered by `npx tsx scripts/verify-live.ts`.
+  const config: Config = {
+    bridge: {
+      mode: "stub",
+      host: "127.0.0.1",
+      port: 9876,
+      connectTimeoutMs: 3000,
+      requestTimeoutMs: 750,
+    },
+  };
   const mock = new MockMcpServer();
   registerTools(mock as unknown as Parameters<typeof registerTools>[0], config);
 

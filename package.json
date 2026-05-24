@@ -1,6 +1,6 @@
 {
   "name": "flstudio-mcp-goldwep",
-  "version": "1.0.0-rc1",
+  "version": "1.0.0-rc2",
   "type": "module",
   "description": "MCP server for FL Studio (Image-Line) — full-spectrum composition and project inspection over a localhost socket bridge into FL Studio's bundled Python scripting environment.",
   "author": "goldwep",
@@ -17,6 +17,7 @@
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "verify:live": "tsx scripts/verify-live.ts",
     "prepare": "npm run build"
   },
   "dependencies": {
