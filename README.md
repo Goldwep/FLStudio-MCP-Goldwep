@@ -2,11 +2,22 @@
 
 MCP server for FL Studio (Image-Line). Full-spectrum control surface — composition _and_ project inspection — for LLM workflows. Built on a localhost bridge into FL Studio's bundled Python 3.12 MIDI scripting environment, with `.pyscript` deploy + PyFLP project intelligence as auxiliary surfaces.
 
-**110 tools registered across 9 milestones.**
+**110 tools registered across 9 milestones. Bridge transport implemented and unit-tested.**
 
-> **Status (2026-05-23): v0.9.1-pre-bridge.** Tool surface complete (110 tools registered), but the bridge transport is not yet wired — most FL-API tools throw `BRIDGE_NOT_READY` against `StubBridge` until the L0 probe completes and a real transport (TCP socket or virtual MIDI) lands. Honest functional status: **~14 tools work today** (the L6 `.pyscript` deploys + L7 PyFLP scans + L8b's pure-TS snapshot/diff + `ping`). The other ~96 register correctly and pass schema validation but will reject at the bridge layer until v1.0.
+> **Status (2026-05-24): v1.0.0-rc1.** Bridge transport is implemented (single-threaded non-blocking socket polled from FL's `OnIdle` — architecture locked by [`docs/PROBE-REPORT.md`](./docs/PROBE-REPORT.md)). Two halves shipped:
 >
-> A 5-reviewer audit cycle (L1 friendly → L5 pathological, 77 raw findings, ~30 unique after dedup) plus a vendor-script audit of every `bridge.call` (62 vendor-confirmed, 10 docs-only flagged `[unverified]`, 8 invented/rescued) is documented in [docs/AUDIT-CYCLE.md](./docs/AUDIT-CYCLE.md) and `_scratch/flstudio-mcp-research/bridge-contract-audit.md`. The original `v1.0.0` tag is retained for history; `v1.0` proper waits for transport. Run the probe ([docs/L0-PROBE-RUN.md](./docs/L0-PROBE-RUN.md)) to unblock.
+> - `bridge/device_FLStudioMCP.py` (FL-side, 970 lines, 88-entry dispatch table covering every `bridge.call` method in `src/tools/`)
+> - `src/bridge/socket.ts` (Node-side, 258 lines, `SocketBridge implements Bridge` with lazy connect, per-request id matching, 750ms timeout, reconnect logic)
+>
+> **End-to-end mock test passes** (`tests/bridge_device_smoke.py`): 13 scenarios — read/write/composite/bridge-internal/translation/error all round-trip cleanly. Plus 5 SocketBridge unit tests covering connect-failure / ok-response / error-response / timeout / out-of-order id routing.
+>
+> **What's still pending for v1.0.0 final** (cuts when one of these lands):
+>
+> - **Probe-2** — confirm `processRECEvent(REC_Chan_NoteOn, ...)` actually adds a note to the pattern. L0 confirmed the call is accepted; landing is the open question. Non-destructive probe at `bridge/probes/device_FLStudioMCP_Probe2.py` is deployed and ready — user assigns it as a controller in FL MIDI settings, reads result. If yes → L6 piano-roll dispatch collapses into REC-based live composition.
+> - **Live FL integration test** — assign `FLStudio MCP Bridge` as a controller in FL Studio MIDI Settings (see [`docs/INSTALL.md`](./docs/INSTALL.md)), then verify `channels_count` round-trip from Claude → MCP → bridge → FL → response.
+> - **`[UNVERIFIED]` tool re-check** — 10 tools whose underlying FL API has zero vendor-script precedent (`mixer.setCurrentTempo`, `setRouteToLevel`, `setEqGain`, `setEqFrequency`, `setEqFreq`, `linkChannelToTrack`, `getRecPPB`, `currentTime`, `getSongLength`, `getFocusedFormID`). Each gets a one-call probe against the live bridge; flags either dropped or tools renamed.
+>
+> **Audit history retained:** 5-reviewer audit cycle (L1 friendly → L5 pathological, 77 raw findings) at [`docs/AUDIT-CYCLE.md`](./docs/AUDIT-CYCLE.md); vendor-script audit of every `bridge.call` (62 vendor-confirmed, 10 docs-only, 8 invented/rescued) at `_scratch/flstudio-mcp-research/bridge-contract-audit.md`. Earlier honest-relabel: `v1.0.0` tag (commit `0b65df8`) → `v0.9.1-pre-bridge` (`6a8f0dd`) → `v1.0.0-rc1` (current).
 
 ## Architecture
 
