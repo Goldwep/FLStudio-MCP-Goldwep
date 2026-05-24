@@ -279,3 +279,56 @@ The MCP server itself (`flstudio-mcp-goldwep` v1.0.0-rc3, npm) is **production-c
 - Live-verify harness (`npm run verify:live`) ready to validate against any FL build whose Python doesn't have the NULL-FileIO bug
 
 The remaining v1.0.0 gate (live-FL round-trip green) is environmental: **the moment Image-Line ships an FL update that fixes the embedded Python file-write bug, the bridge becomes operational with zero further code changes.** Tracking this externally; no further architectural pivots are warranted from inside the device script.
+
+## BREAKTHROUGH: bytes-path workaround (2026-05-24, probe-2 + probe-3) ✅
+
+A more granular probe (probe-2: 25 write primitives × 4 paths) revealed that the FileIO NULL bug is **path-encoding-specific**, not write-mode or path-prefix specific:
+
+| Primitive                                           | Result                                                    |
+| --------------------------------------------------- | --------------------------------------------------------- |
+| `open(STR_path, "w"/"wb"/"a"/"ab")`                 | ❌                                                        |
+| `open(BYTES_path, "wb"/"ab")` (bytes path + binary) | ✅                                                        |
+| `os.open(STR_path, ...)` + os.write                 | ❌ (TypeError "bad argument type")                        |
+| `os.open(BYTES_path, ...)` + os.write               | ✅                                                        |
+| `pathlib.Path.write_bytes()` / `write_text()`       | ❌ (uses str-path open internally)                        |
+| `logging.FileHandler` / `RotatingFileHandler`       | ❌ (uses str-path open)                                   |
+| `tempfile.mkstemp` / `NamedTemporaryFile`           | ❌ (TypeError "bad argument type for built-in operation") |
+| `subprocess.Popen` (cmd /c echo > file)             | ❌ (CreatePipe NULL bug)                                  |
+| `socket.socket()`                                   | ❌ (NULL — unchanged from earlier finding)                |
+| `import ctypes`                                     | ❌ (ImportError — subinterpreter ban)                     |
+| `print()` / `sys.stdout.write()`                    | ✅ (always works)                                         |
+
+**The fix:** utf-8-encode all paths to bytes before passing to `open()` or `os.open()`. Use binary write mode (`"wb"`/`"ab"`). The bridge's `_write_bytes()` helper does exactly this and all writes succeed.
+
+### Probe-3: file removal also broken (but workable)
+
+A follow-up probe tested removal primitives:
+
+| Primitive                                              | Result                  |
+| ------------------------------------------------------ | ----------------------- |
+| `os.remove(STR or BYTES path)`                         | ❌ NULL                 |
+| `os.unlink(STR or BYTES path)`                         | ❌ NULL                 |
+| `Path.unlink()`                                        | ❌ NULL                 |
+| `os.rename(BYTES, BYTES)`                              | ❌ NULL                 |
+| `subprocess "cmd /c del"`                              | ❌ NULL (CreatePipe)    |
+| **truncate via `open(bytes, "wb")` + immediate close** | ✅ file becomes 0 bytes |
+
+The bridge uses the truncate-as-tombstone pattern: after processing a `req_<id>.json`, it opens the file in `wb` mode and closes immediately (zero-byte write). On the next OnIdle tick, the 0-byte file is treated as "already processed, skip." Node side then unlinks both request and response files after reading the response (Node's `fs.unlink` is unaffected by FL's bug class).
+
+### Live verification (2026-05-24, post-breakthrough)
+
+```
+$ npm run verify:live
+[verify] OVERALL: 39 ok / 0 fail / 0 timeout / 49 skip
+[verify] all green.
+```
+
+The 49 skips are write/mutating operations (need `--include-writes` to test against the user's project). The 39 ok cover every read-side method that an empty FL project can answer. Zero timeouts, zero failures.
+
+### Updated architecture (post-breakthrough)
+
+| Decision                                                                            | Locked? | Rationale                                                                                                       |
+| ----------------------------------------------------------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------- |
+| File I/O: **bytes-path + binary mode** for all writes                               | ✅ Yes  | The only Python-level write primitives that bypass FL 3.12.1's `_io.FileIO` NULL bug.                           |
+| Request cleanup: **truncate-as-tombstone** (FL-side) + unlink (Node-side)           | ✅ Yes  | All file-removal primitives fail in FL Python. 0-byte tombstones are idempotent and use only the working write. |
+| Per-request timeout: **1500ms** (Node default), bumped to **3000ms** in verify-live | ✅ Yes  | Generous budget for FL idle-tick variability under load.                                                        |

@@ -18,10 +18,12 @@
 //                                                "traceback": "..."}
 //
 // Race-condition notes:
-//   * Request files are deleted by FL BEFORE dispatching (so a crash
-//     during dispatch can't loop forever on a poison request). The Node
-//     side does NOT unlink the request file -- only the response file
-//     after reading it.
+//   * Request files are TRUNCATED (not deleted) by FL after dispatching.
+//     FL Python 3.12.1 cannot delete files (every removal primitive hits
+//     the NULL bug class) — see PROBE-REPORT.md "remove probe" finding.
+//     The Node side cleans up the truncated tombstones by unlinking the
+//     request file after the response is received; FL won't re-dispatch
+//     a 0-byte req on a later OnIdle tick (it treats them as processed).
 //   * Response files are read + parsed + unlinked. If parsing fails the
 //     file is unlinked anyway so the next call with the same id doesn't
 //     pick up corrupted data. (Ids are monotonic per Node session; FL
@@ -135,8 +137,10 @@ export class FileBridge implements Bridge {
           await sleep(this.pollIntervalMs);
           continue;
         }
-        // We have a complete parse. Unlink and route the result.
+        // We have a complete parse. Unlink BOTH files (FL can't delete --
+        // see header comment) and route the result.
         await safeUnlink(respPath);
+        await safeUnlink(reqPath);
         if (parsed.ok === true) {
           return parsed.result;
         }

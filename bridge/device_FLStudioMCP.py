@@ -97,98 +97,58 @@ HEARTBEAT_PATH = IPC_DIR / "bridge_alive.txt"
 
 
 # ----------------------------------------------------------------------
-# File I/O -- empirically, FL's embedded Python 3.12.1 sub-interpreter
-# blocks `import _ctypes` AND returns NULL-without-exception for builtin
-# open(path, "w"/"a") AND for os.open(). The ONE write path that DID
-# work in earlier sessions: logging.FileHandler. Try multiple primitives
-# in order, fall through on failure, surface the situation via print().
+# File I/O -- BREAKTHROUGH 2026-05-24: FL's embedded Python 3.12.1
+# sub-interpreter has a path-encoding bug in `_io.FileIO`. Empirical
+# probe-2 results across ~25 write primitives showed exactly two paths
+# that WORK:
+#   * open(BYTES_path, "wb"/"ab")  -- bytes path + binary mode
+#   * os.open(BYTES_path, O_WRONLY|O_CREAT|O_TRUNC) + os.write()
+# Everything else (str paths, text mode, encoding kwarg, pathlib,
+# logging.FileHandler, tempfile.mkstemp, io.FileIO, shutil.copy,
+# subprocess pipes) hits the `_io.FileIO returned NULL without setting
+# an exception` bug or a related TypeError "bad argument type".
+#
+# The fix: encode all paths to bytes (utf-8) and use binary write mode.
 # ----------------------------------------------------------------------
 
-import logging as _logging  # noqa: E402
 
-_BRIDGE_LOGGER = None
-
-
-def _ensure_logger():
-    """Lazy-init a logging.FileHandler-backed logger. Idempotent.
-
-    Returns the logger or None if init fails. The socket-bridge version
-    used this approach and successfully wrote bridge.log -- if FL's
-    Python file IO is in a state where ANY write works, this is it.
-    """
-    global _BRIDGE_LOGGER
-    if _BRIDGE_LOGGER is not None:
-        return _BRIDGE_LOGGER
-    try:
-        lg = _logging.getLogger("mcp-bridge")
-        lg.setLevel(_logging.INFO)
-        lg.propagate = False
-        # Only add handler once -- check existing handlers for our file path.
-        already = False
-        for h in lg.handlers:
-            if isinstance(h, _logging.FileHandler) and getattr(h, "baseFilename", "") == str(LOG_PATH):
-                already = True
-                break
-        if not already:
-            handler = _logging.FileHandler(str(LOG_PATH), mode="a", encoding="utf-8", delay=True)
-            handler.setFormatter(
-                _logging.Formatter(
-                    "%(asctime)s %(levelname)s %(message)s",
-                    datefmt="%Y-%m-%d %H:%M:%S",
-                )
-            )
-            lg.addHandler(handler)
-        _BRIDGE_LOGGER = lg
-        return lg
-    except Exception as exc:
-        print("[mcp-bridge] logger init failed: %s" % exc)
-        return None
+def _bp(path):
+    """Render a path-like as a bytes path for FL's broken Python."""
+    if isinstance(path, bytes):
+        return path
+    return str(path).encode("utf-8")
 
 
 def _write_bytes(path, data, append=False):
-    """Write data to path. Tries multiple primitives because FL's Python
-    has multiple broken IO paths. Returns True on first success.
-
-    Strategy:
-      1. builtin open() in "w"/"a" mode (often broken, but try anyway --
-         if the FileIO NULL bug isn't tripping for this path it works)
-      2. os.open() + os.write() (also often broken, try as fallback)
-      3. Path.write_bytes / Path.write_text via pathlib
-
-    On failure all the way through, return False; caller logs via print()
-    so the user sees the failure even if the log file is unwritable.
+    """Write data to path. Uses the only two write primitives empirically
+    confirmed to work in FL 2024 v24.2.2 Python 3.12.1 sub-interpreter:
+      1. open(bytes_path, "wb"/"ab")
+      2. os.open(bytes_path, ...) + os.write()
+    Returns True on first success. Falls back gracefully if any primitive
+    later breaks in a future FL build.
     """
     if isinstance(data, str):
-        data_str = data
         data_bytes = data.encode("utf-8")
     else:
         data_bytes = data
-        data_str = None
 
-    mode = "a" if append else "w"
-    mode_b = "ab" if append else "wb"
+    bytes_path = _bp(path)
+    mode_b = b"ab" if append else b"wb"
+    mode_b_str = "ab" if append else "wb"
 
-    # Attempt 1: builtin open() text mode
+    # Primary: open(bytes, "wb") -- WORKS in FL 2024 v24.2.2 (probe-2 B1)
     try:
-        with open(str(path), mode, encoding="utf-8") as fh:
-            fh.write(data_str if data_str is not None else data_bytes.decode("utf-8"))
-        return True
-    except Exception:
-        pass
-
-    # Attempt 2: builtin open() binary mode
-    try:
-        with open(str(path), mode_b) as fh:
+        with open(bytes_path, mode_b_str) as fh:
             fh.write(data_bytes)
         return True
     except Exception:
         pass
 
-    # Attempt 3: os.open + os.write
+    # Secondary: os.open(bytes, ...) + os.write -- WORKS in FL (probe-2 C2)
     try:
         flags = os.O_WRONLY | os.O_CREAT
         flags |= os.O_APPEND if append else os.O_TRUNC
-        fd = os.open(str(path), flags)
+        fd = os.open(bytes_path, flags)
         try:
             os.write(fd, data_bytes)
         finally:
@@ -197,7 +157,20 @@ def _write_bytes(path, data, append=False):
     except Exception:
         pass
 
-    # Attempt 4: pathlib
+    # Tertiary fallback: str path + text mode (broken in this FL build,
+    # but kept so the bridge auto-works if Image-Line fixes the bug)
+    mode = "a" if append else "w"
+    try:
+        with open(str(path), mode, encoding="utf-8") as fh:
+            if isinstance(data, bytes):
+                fh.write(data.decode("utf-8"))
+            else:
+                fh.write(data)
+        return True
+    except Exception:
+        pass
+
+    # Final fallback: pathlib (also broken via FileIO, but try anyway)
     try:
         if append:
             existing = b""
@@ -216,29 +189,12 @@ def _write_bytes(path, data, append=False):
 
 
 def _log(level, msg):
-    """Append a single timestamped line to LOG_PATH. Best-effort.
-
-    Tries logging.FileHandler first (empirically works in some FL Python
-    states), then falls back to direct _write_bytes attempts.
+    """Append a single timestamped line to LOG_PATH via _write_bytes,
+    which uses the bytes-path workaround for FL's broken _io.FileIO.
+    Best-effort: WARN/ERROR also print() to Script Output as a backstop.
     """
-    # WARN/ERROR always go to Script Output via print() -- guaranteed visible.
     if level in ("WARN", "ERROR"):
         print("[mcp-bridge] %s %s" % (level, msg))
-
-    lg = _ensure_logger()
-    if lg is not None:
-        try:
-            if level == "ERROR":
-                lg.error(msg)
-            elif level == "WARN":
-                lg.warning(msg)
-            else:
-                lg.info(msg)
-            return
-        except Exception:
-            pass
-
-    # Fallback to direct write
     line = "%s %s %s\n" % (
         time.strftime("%Y-%m-%d %H:%M:%S"),
         level,
@@ -303,7 +259,7 @@ def OnInit():
     # Write a heartbeat file so Node-side `wait_for_bridge` can detect us
     # before the first real request. Content is just the start timestamp.
     if not _write_bytes(HEARTBEAT_PATH, str(int(time.time() * 1000)), append=False):
-        _log("WARN", "OnInit: heartbeat write failed (raw os.write also failed)")
+        _log("WARN", "OnInit: heartbeat write failed (all primitives)")
 
     msg = "MCP file-IPC bridge ready at %s" % IPC_DIR
     _log("INFO", msg)
@@ -314,16 +270,21 @@ def OnDeInit():
     """Best-effort teardown. Does NOT fire on Reload Script (Q4)."""
     _log("INFO", "OnDeInit fired")
     # Best-effort heartbeat removal so a stale heartbeat doesn't fool the
-    # Node side into thinking FL is still up.
-    try:
-        if os.path.isfile(str(HEARTBEAT_PATH)):
-            os.remove(str(HEARTBEAT_PATH))
-    except Exception:
-        pass
+    # Node side into thinking FL is still up. _safe_remove uses bytes path
+    # (FL's os.remove(str) hits the same NULL-bug class as the writes).
+    if os.path.isfile(str(HEARTBEAT_PATH)):
+        _safe_remove(HEARTBEAT_PATH)
 
 
 def OnIdle():
-    """Pump the file IPC channel: scan ipc/, dispatch, write responses."""
+    """Pump the file IPC channel: scan ipc/, dispatch, write responses.
+
+    NOTE: FL 2024 Python cannot delete files (every remove primitive hits
+    the NULL bug). We instead use truncate-to-0-bytes as a "tombstone":
+    a 0-byte req_*.json means "already processed, skip". This is
+    idempotent (re-truncating costs nothing) and uses only the working
+    open(bytes,"wb") primitive.
+    """
     if not os.path.isdir(str(IPC_DIR)):
         return
 
@@ -344,11 +305,7 @@ def OnIdle():
     if not req_names:
         return
 
-    # Stable order so older requests dispatch first even if listdir returns
-    # them out of order. File names embed an incrementing id from the Node
-    # side, so lexical sort is "good enough" (zero-padded numeric would be
-    # strictly correct, but ids reset to 1 per process so lexical works
-    # within a single Node session).
+    # Stable order so older requests dispatch first.
     req_names.sort()
 
     processed = 0
@@ -356,36 +313,36 @@ def OnIdle():
         if processed >= MAX_REQUESTS_PER_TICK:
             break
         req_path = IPC_DIR / name
+        bytes_req_path = _bp(req_path)
 
-        # Read + delete + dispatch + write response. If anything fails we
-        # try hard to delete the request file so we don't get stuck looping
-        # on a poison request.
+        # Skip 0-byte tombstones (already processed in a previous tick).
+        try:
+            if os.path.getsize(str(req_path)) == 0:
+                continue
+        except Exception:
+            pass
+
+        # Read the request via bytes path + binary mode (works in FL).
         raw = None
         try:
-            with open(str(req_path), "r", encoding="utf-8") as fh:
-                raw = fh.read()
+            with open(bytes_req_path, "rb") as fh:
+                raw = fh.read().decode("utf-8")
         except Exception as exc:
             _log("WARN", "OnIdle: could not read %s: %s" % (name, exc))
-            _safe_remove(req_path)
+            _safe_remove(req_path)  # tombstone the unreadable file
             continue
 
-        # Delete the request file BEFORE dispatching. If the handler raises
-        # or stalls, the request is already off the queue -- it won't be
-        # picked up again on the next tick. The cost: if FL crashes mid-
-        # dispatch, the request is lost and the Node caller will time out.
+        # Tombstone BEFORE dispatching so the handler raising won't cause
+        # re-execution on the next tick. We can't truly delete (FL bug),
+        # but truncating to 0 bytes is the working equivalent.
         _safe_remove(req_path)
 
         response_bytes, req_id = _handle_request(raw)
 
-        # Write the response file. Node polls for resp_<id>.json with the
-        # matching id; if the write fails we log and move on (the caller
-        # will time out, which is the correct surface).
+        # Write response. Bridge uses bytes-path + binary mode (works).
         resp_path = IPC_DIR / ("resp_%s.json" % _id_for_filename(req_id))
         if not _write_bytes(resp_path, response_bytes, append=False):
-            _log(
-                "ERROR",
-                "OnIdle: could not write %s (raw os.write failed)" % resp_path.name,
-            )
+            _log("ERROR", "OnIdle: could not write %s" % resp_path.name)
 
         processed += 1
 
@@ -450,14 +407,39 @@ def _cleanup_ipc_dir():
 
 
 def _safe_remove(path):
-    """Best-effort file removal. Returns True if file is gone afterward."""
+    """Best-effort file 'removal' for FL 2024 v24.2.2 Python.
+
+    Empirical 2026-05-24 probe-3 result: every removal primitive
+    (os.remove/os.unlink with str OR bytes paths, Path.unlink,
+    subprocess cmd /c del, os.rename) fails with the NULL-bug class.
+
+    The only working "make this file go away from OnIdle's perspective"
+    primitive is truncate via open(bytes, "wb"): the file remains on
+    disk at 0 bytes, but OnIdle treats 0-byte req_*.json as "already
+    processed, skip" (idempotent read of empty content).
+
+    Returns True if the file is gone or truncated (effectively gone
+    from OnIdle's perspective).
+    """
+    bytes_path = _bp(path)
+    # Try real removal first -- works if FL fixes the bug
+    for remover in (os.remove, os.unlink):
+        try:
+            remover(bytes_path)
+            return True
+        except FileNotFoundError:
+            return True
+        except Exception:
+            continue
+    # Fallback: truncate to 0 bytes via the working open(bytes,"wb")
     try:
-        os.remove(str(path))
+        with open(bytes_path, "wb"):
+            pass
         return True
     except FileNotFoundError:
         return True
     except Exception as exc:
-        _log("WARN", "remove failed for %s: %s" % (path, exc))
+        _log("WARN", "could not truncate %s: %s" % (path, exc))
         return False
 
 
