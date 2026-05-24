@@ -1,26 +1,26 @@
 """
-Smoke test for bridge/device_FLStudioMCP.py.
+Smoke test for bridge/device_FLStudioMCP.py (file-IPC version).
 
 Mocks the FL-injected modules (channels, mixer, patterns, transport, etc.)
 and the FL-side `midi` constants, then runs the device script as a normal
-Python program. Exercises EVERY entry in the DISPATCH table (88 total) plus
-the original 13 architectural scenarios:
+Python program. Exercises EVERY entry in the DISPATCH table (88 total).
 
-- OnInit binds the socket cleanly
-- Per-dispatch-entry round-trip (88): each entry sent over the socket once,
-  asserting `ok: true` came back. Side effects on write methods are
-  spot-checked at module-level.
-- Composite bridge translations: general.saveProject + transport.toggleMetronome
-  + transport.tapTempo all route through transport.globalTransport with the
-  matching FPT_* constant.
-- state.setSubscribed + state.drainChanges drains the OnDirty* event queue.
-- Error path: unknown method returns ok:false.
-- OnDeInit closes the socket.
+File-IPC contract recap:
+    ipc/req_<id>.json   — client writes; FL reads + deletes + dispatches
+    ipc/resp_<id>.json  — FL writes;     client reads + deletes
 
-This is the closest we can get to integration testing without actually
-running FL Studio. Catches typos in DISPATCH, signature mismatches between
-the handler shim and the mocked FL function, framing bugs in the socket
-loop, etc. Real-FL integration uses `npx tsx scripts/verify-live.ts`.
+Test flow:
+    1. Create a temp IPC dir, then redirect the device script's IPC_DIR /
+       LOG_PATH / HEARTBEAT_PATH at it via monkey-patching after exec.
+    2. Call OnInit -- should drain leftovers (test pre-creates one to
+       prove the cleanup happens) and write the heartbeat file.
+    3. For every DISPATCH entry, write req_<id>.json, call OnIdle in a
+       loop until resp_<id>.json appears, assert ok:true.
+    4. Spot-check the original 13 architectural scenarios (composites,
+       state.subscribe + drainChanges, unknown-method error path).
+    5. Final assertion: 100% DISPATCH coverage (88/88).
+
+Real-FL integration uses `npx tsx scripts/verify-live.ts`.
 
 Run:
     python tests/bridge_device_smoke.py
@@ -29,8 +29,9 @@ Run:
 from __future__ import annotations
 
 import json
-import socket
+import os
 import sys
+import tempfile
 import time
 import types
 from pathlib import Path
@@ -40,7 +41,7 @@ DEVICE_SCRIPT = REPO_ROOT / "bridge" / "device_FLStudioMCP.py"
 
 
 # ---------------------------------------------------------------------------
-# Mock FL-injected modules
+# Mock FL-injected modules (same shape as the socket-era smoke test)
 # ---------------------------------------------------------------------------
 
 _mock_channels_state = {
@@ -214,44 +215,47 @@ def _build_mock_modules() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test harness
+# File-IPC client helpers (we play the role of FileBridge here)
 # ---------------------------------------------------------------------------
 
 
-def _request(sock: socket.socket, request_id: int, method: str, args=None):
+def _send_request(ipc_dir: Path, request_id, method, args=None):
+    """Write req_<id>.json. Returns the path used."""
     payload = {"id": request_id, "method": method}
     if args is not None:
         payload["args"] = args
-    sock.sendall((json.dumps(payload) + "\n").encode("utf-8"))
+    req_path = ipc_dir / f"req_{request_id}.json"
+    with open(req_path, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(payload))
+    return req_path
 
 
-def _wait_for_response(sock: socket.socket, device_globals, max_ticks=40):
-    """Drain OnIdle until a response arrives, with a budget."""
-    sock.settimeout(0.001)
-    buf = b""
+def _wait_for_response(ipc_dir: Path, request_id, device_globals, max_ticks=40):
+    """Pump OnIdle until resp_<id>.json appears. Returns the parsed dict."""
+    resp_path = ipc_dir / f"resp_{request_id}.json"
     for _ in range(max_ticks):
         device_globals["OnIdle"]()
-        try:
-            chunk = sock.recv(4096)
-            if chunk:
-                buf += chunk
-                if b"\n" in buf:
-                    line, _, _ = buf.partition(b"\n")
-                    return json.loads(line.decode("utf-8"))
-        except (BlockingIOError, socket.timeout):
-            pass
-        time.sleep(0.02)
-    raise AssertionError(f"no response within {max_ticks} ticks; buffer={buf!r}")
+        if resp_path.exists():
+            with open(resp_path, "r", encoding="utf-8") as fh:
+                raw = fh.read()
+            os.remove(resp_path)
+            return json.loads(raw)
+        time.sleep(0.005)
+    raise AssertionError(
+        f"no response within {max_ticks} ticks for id={request_id} "
+        f"(req file present={ (ipc_dir / f'req_{request_id}.json').exists() }, "
+        f"resp file present={resp_path.exists()})"
+    )
+
+
+def _roundtrip(ipc_dir: Path, request_id, method, device_globals, args=None):
+    """Send + wait. Returns the response dict."""
+    _send_request(ipc_dir, request_id, method, args)
+    return _wait_for_response(ipc_dir, request_id, device_globals)
 
 
 # ---------------------------------------------------------------------------
-# Per-dispatch-entry probe table
-#
-# Mirrors scripts/verify-live.ts but adapted for mocked FL — every entry in
-# the device script's DISPATCH table appears here exactly once. `kind`:
-#   - "read"     : pure getter (or composite that returns a sentinel)
-#   - "write"    : mutates state, asserts a side effect
-#   - "internal" : MCP-bridge primitive
+# Per-dispatch-entry probe table — mirrors scripts/verify-live.ts
 # ---------------------------------------------------------------------------
 
 DISPATCH_PROBES: list[tuple[str, dict, str]] = [
@@ -368,7 +372,7 @@ DISPATCH_PROBES: list[tuple[str, dict, str]] = [
 ]
 
 
-def _run_dispatch_coverage(client, device_globals) -> tuple[int, int, int, list[str]]:
+def _run_dispatch_coverage(ipc_dir: Path, device_globals) -> tuple[int, int, int, list[str]]:
     """
     Send every DISPATCH entry once, count successful round-trips.
     Returns (ok_reads, ok_writes, ok_internal, failures).
@@ -381,9 +385,8 @@ def _run_dispatch_coverage(client, device_globals) -> tuple[int, int, int, list[
 
     for method, args, kind in DISPATCH_PROBES:
         next_id += 1
-        _request(client, next_id, method, args)
         try:
-            resp = _wait_for_response(client, device_globals)
+            resp = _roundtrip(ipc_dir, next_id, method, device_globals, args)
         except AssertionError as e:
             failures.append(f"{method}: timed out — {e}")
             continue
@@ -400,23 +403,17 @@ def _run_dispatch_coverage(client, device_globals) -> tuple[int, int, int, list[
     return ok_reads, ok_writes, ok_internal, failures
 
 
-def _assert_write_side_effect(method: str, expected_args: tuple) -> str | None:
-    """
-    Look up the last recorded call to `method` and assert positional args
-    match `expected_args`. Returns an error string on mismatch (or absence),
-    None on success.
-    """
-    matches = [c for c in _mock_calls if c[0] == method]
-    if not matches:
-        return f"{method}: no side effect recorded"
-    last_args = matches[-1][1]
-    if last_args != expected_args:
-        return f"{method}: args were {last_args}, expected {expected_args}"
-    return None
-
-
 def main() -> int:
     _build_mock_modules()
+
+    # ---- Create a temp IPC dir and patch the device script onto it. ----
+    tmpdir = Path(tempfile.mkdtemp(prefix="flstudio-mcp-smoke-"))
+    ipc_dir = tmpdir / "ipc"
+    ipc_dir.mkdir()  # Normal Python -- works fine here. FL is the one that can't.
+
+    # Pre-create a stale leftover request file. OnInit should drain it.
+    leftover = ipc_dir / "req_9999.json"
+    leftover.write_text(json.dumps({"id": 9999, "method": "ping"}), encoding="utf-8")
 
     # Load the device script
     device_globals: dict = {"__name__": "__main__"}
@@ -425,10 +422,18 @@ def main() -> int:
         device_globals,
     )
 
+    # Override the paths to point at our temp dir (Path objects so they
+    # work with the same str() conversion the device script uses).
+    device_globals["SCRIPT_DIR"] = tmpdir
+    device_globals["IPC_DIR"] = ipc_dir
+    device_globals["LOG_PATH"] = tmpdir / "bridge.log"
+    device_globals["HEARTBEAT_PATH"] = ipc_dir / "bridge_alive.txt"
+
     dispatch_count = len(device_globals.get("DISPATCH", {}))
     print(f"[smoke] device script loaded ({dispatch_count} dispatch entries)")
+    print(f"[smoke] tmp IPC dir: {ipc_dir}")
 
-    # OnInit binds the socket
+    # OnInit cleans up leftover and writes heartbeat
     try:
         device_globals["OnInit"]()
     except Exception as e:
@@ -436,67 +441,63 @@ def main() -> int:
         return 1
 
     failures = []
-    client = None
-    try:
-        # Allow OS a moment to publish the listen
-        time.sleep(0.1)
-        client = socket.create_connection(("127.0.0.1", 9876), timeout=2.0)
-        client.setblocking(False)
 
+    # OnInit should have removed the leftover.
+    if leftover.exists():
+        failures.append(f"OnInit did not drain stale request file {leftover}")
+    # And written the heartbeat.
+    if not (ipc_dir / "bridge_alive.txt").exists():
+        failures.append("OnInit did not write bridge_alive.txt heartbeat")
+
+    try:
         # --- 1. ping ---
-        _request(client, 1, "ping")
-        resp = _wait_for_response(client, device_globals)
+        resp = _roundtrip(ipc_dir, 1, "ping", device_globals)
         assert resp["ok"], f"ping not ok: {resp}"
         assert resp["result"]["pong"] is True, f"ping result: {resp}"
         print(f"[smoke] ping OK: {resp['result']}")
 
         # --- 2. channels.channelCount ---
-        _request(client, 2, "channels.channelCount")
-        resp = _wait_for_response(client, device_globals)
+        resp = _roundtrip(ipc_dir, 2, "channels.channelCount", device_globals)
         assert resp["ok"] and resp["result"] == 3, f"channelCount: {resp}"
         print(f"[smoke] channels.channelCount = {resp['result']}")
 
         # --- 3. channels.getChannelName ---
-        _request(client, 3, "channels.getChannelName", {"index": 1})
-        resp = _wait_for_response(client, device_globals)
+        resp = _roundtrip(ipc_dir, 3, "channels.getChannelName", device_globals, {"index": 1})
         assert resp["ok"] and resp["result"] == "Snare", f"getChannelName: {resp}"
         print(f"[smoke] channels.getChannelName(1) = {resp['result']!r}")
 
         # --- 4. mixer.trackCount ---
-        _request(client, 4, "mixer.trackCount")
-        resp = _wait_for_response(client, device_globals)
+        resp = _roundtrip(ipc_dir, 4, "mixer.trackCount", device_globals)
         assert resp["ok"] and resp["result"] == 16, f"mixer.trackCount: {resp}"
         print(f"[smoke] mixer.trackCount = {resp['result']}")
 
         # --- 5. mixer.getTrackName(0) — Master ---
-        _request(client, 5, "mixer.getTrackName", {"index": 0})
-        resp = _wait_for_response(client, device_globals)
+        resp = _roundtrip(ipc_dir, 5, "mixer.getTrackName", device_globals, {"index": 0})
         assert resp["ok"] and resp["result"] == "Master", f"mixer.getTrackName: {resp}"
         print(f"[smoke] mixer.getTrackName(0) = {resp['result']!r}")
 
         # --- 6. patterns.patternCount ---
-        _request(client, 6, "patterns.patternCount")
-        resp = _wait_for_response(client, device_globals)
+        resp = _roundtrip(ipc_dir, 6, "patterns.patternCount", device_globals)
         assert resp["ok"] and resp["result"] == 1, f"patternCount: {resp}"
         print(f"[smoke] patterns.patternCount = {resp['result']}")
 
         # --- 7. general.getProjectTitle ---
-        _request(client, 7, "general.getProjectTitle")
-        resp = _wait_for_response(client, device_globals)
+        resp = _roundtrip(ipc_dir, 7, "general.getProjectTitle", device_globals)
         assert resp["ok"] and resp["result"] == "Untitled.flp", f"getProjectTitle: {resp}"
         print(f"[smoke] general.getProjectTitle = {resp['result']!r}")
 
         # --- 8. write-side: channels.setChannelVolume — verify side effect ---
-        _record_count_before = len(
-            [c for c in _mock_calls if c[0] == "channels.setChannelVolume"]
+        before = len([c for c in _mock_calls if c[0] == "channels.setChannelVolume"])
+        resp = _roundtrip(
+            ipc_dir,
+            8,
+            "channels.setChannelVolume",
+            device_globals,
+            {"index": 0, "value": 0.9},
         )
-        _request(client, 8, "channels.setChannelVolume", {"index": 0, "value": 0.9})
-        resp = _wait_for_response(client, device_globals)
         assert resp["ok"], f"setChannelVolume: {resp}"
-        _record_count_after = len(
-            [c for c in _mock_calls if c[0] == "channels.setChannelVolume"]
-        )
-        assert _record_count_after == _record_count_before + 1, "side effect not recorded"
+        after = len([c for c in _mock_calls if c[0] == "channels.setChannelVolume"])
+        assert after == before + 1, "side effect not recorded"
         last_call = [c for c in _mock_calls if c[0] == "channels.setChannelVolume"][-1]
         assert last_call[1] == (0, 0.9), f"args were {last_call[1]}"
         print(f"[smoke] channels.setChannelVolume(0, 0.9) recorded side effect OK")
@@ -504,34 +505,35 @@ def main() -> int:
         # --- 9. composite: mixer.setRouteTo + afterRoutingChanged ---
         before_set = len([c for c in _mock_calls if c[0] == "mixer.setRouteTo"])
         before_after = len([c for c in _mock_calls if c[0] == "mixer.afterRoutingChanged"])
-        _request(client, 9, "mixer.setRouteTo", {"source": 1, "dest": 2, "value": 1})
-        resp = _wait_for_response(client, device_globals)
+        resp = _roundtrip(
+            ipc_dir,
+            9,
+            "mixer.setRouteTo",
+            device_globals,
+            {"source": 1, "dest": 2, "value": 1},
+        )
         assert resp["ok"], f"setRouteTo: {resp}"
         after_set = len([c for c in _mock_calls if c[0] == "mixer.setRouteTo"])
-        # Caller pattern is two MCP calls (setRouteTo, then afterRoutingChanged separately);
-        # bridge.call("mixer.setRouteTo") only dispatches setRouteTo here.
         assert after_set == before_set + 1, "setRouteTo not recorded"
-        # afterRoutingChanged is a separate bridge call:
-        _request(client, 10, "mixer.afterRoutingChanged")
-        resp = _wait_for_response(client, device_globals)
+        resp = _roundtrip(ipc_dir, 10, "mixer.afterRoutingChanged", device_globals)
         assert resp["ok"], f"afterRoutingChanged: {resp}"
         after_after = len([c for c in _mock_calls if c[0] == "mixer.afterRoutingChanged"])
         assert after_after == before_after + 1, "afterRoutingChanged not recorded"
         print(f"[smoke] mixer setRouteTo + afterRoutingChanged composite OK")
 
         # --- 10. bridge-internal: state.setSubscribed + state.drainChanges ---
-        _request(client, 11, "state.setSubscribed", {"enabled": True})
-        resp = _wait_for_response(client, device_globals)
+        resp = _roundtrip(
+            ipc_dir, 11, "state.setSubscribed", device_globals, {"enabled": True}
+        )
         assert resp["ok"] and resp["result"]["subscribed"] is True, f"setSubscribed: {resp}"
         print(f"[smoke] state.setSubscribed(True) -> {resp['result']}")
 
-        # Trigger an OnDirty event manually
+        # Trigger OnDirty events manually
         if "OnDirtyChannel" in device_globals:
             device_globals["OnDirtyChannel"](0, 0)  # CE_New
             device_globals["OnDirtyMixerTrack"](-1)
 
-        _request(client, 12, "state.drainChanges")
-        resp = _wait_for_response(client, device_globals)
+        resp = _roundtrip(ipc_dir, 12, "state.drainChanges", device_globals)
         assert resp["ok"], f"drainChanges: {resp}"
         events = resp["result"]
         assert isinstance(events, list) and len(events) >= 2, f"drainChanges events: {events}"
@@ -541,48 +543,41 @@ def main() -> int:
 
         # --- 11. bridge composite: general.saveProject -> transport.globalTransport(FPT_Save,...) ---
         before_gt = len([c for c in _mock_calls if c[0] == "transport.globalTransport"])
-        _request(client, 13, "general.saveProject")
-        resp = _wait_for_response(client, device_globals)
+        resp = _roundtrip(ipc_dir, 13, "general.saveProject", device_globals)
         assert resp["ok"], f"saveProject: {resp}"
         after_gt = len([c for c in _mock_calls if c[0] == "transport.globalTransport"])
         assert after_gt == before_gt + 1, "saveProject did not translate to globalTransport"
         last_call = [c for c in _mock_calls if c[0] == "transport.globalTransport"][-1]
-        # First positional arg should be FPT_Save=92
         assert 92 in last_call[1], f"FPT_Save not in args: {last_call[1]}"
         print(f"[smoke] general.saveProject -> globalTransport({last_call[1]}) OK")
 
         # --- 11b. bridge composites: transport.toggleMetronome + transport.tapTempo ---
         before_gt = len([c for c in _mock_calls if c[0] == "transport.globalTransport"])
-        _request(client, 14, "transport.toggleMetronome")
-        resp = _wait_for_response(client, device_globals)
+        resp = _roundtrip(ipc_dir, 14, "transport.toggleMetronome", device_globals)
         assert resp["ok"], f"toggleMetronome: {resp}"
         after_gt = len([c for c in _mock_calls if c[0] == "transport.globalTransport"])
         assert after_gt == before_gt + 1, "toggleMetronome did not translate"
         last_call = [c for c in _mock_calls if c[0] == "transport.globalTransport"][-1]
-        # FPT_Metronome = 110
         assert 110 in last_call[1], f"FPT_Metronome not in args: {last_call[1]}"
 
         before_gt = after_gt
-        _request(client, 15, "transport.tapTempo")
-        resp = _wait_for_response(client, device_globals)
+        resp = _roundtrip(ipc_dir, 15, "transport.tapTempo", device_globals)
         assert resp["ok"], f"tapTempo: {resp}"
         after_gt = len([c for c in _mock_calls if c[0] == "transport.globalTransport"])
         assert after_gt == before_gt + 1, "tapTempo did not translate"
         last_call = [c for c in _mock_calls if c[0] == "transport.globalTransport"][-1]
-        # FPT_TapTempo = 106
         assert 106 in last_call[1], f"FPT_TapTempo not in args: {last_call[1]}"
         print(f"[smoke] toggleMetronome + tapTempo composites OK")
 
         # --- 12. error path: unknown method ---
-        _request(client, 99, "channels.thisDoesNotExist")
-        resp = _wait_for_response(client, device_globals)
+        resp = _roundtrip(ipc_dir, 99, "channels.thisDoesNotExist", device_globals)
         assert not resp["ok"], f"unknown method should fail: {resp}"
         print(f"[smoke] unknown method correctly errors: {resp.get('error')[:60]}...")
 
         # --- 13. FULL DISPATCH COVERAGE — every entry round-trips ----------
         print(f"[smoke] exercising all {len(DISPATCH_PROBES)} DISPATCH entries...")
         ok_reads, ok_writes, ok_internal, probe_failures = _run_dispatch_coverage(
-            client, device_globals
+            ipc_dir, device_globals
         )
         for f in probe_failures:
             failures.append(f"dispatch: {f}")
@@ -613,15 +608,17 @@ def main() -> int:
 
         failures.append(f"unexpected: {type(e).__name__}: {e}\n{_tb.format_exc()}")
     finally:
-        if client:
-            try:
-                client.close()
-            except Exception:
-                pass
         try:
             device_globals["OnDeInit"]()
         except Exception as e:
             failures.append(f"OnDeInit raised: {e}")
+        # Best-effort tmp cleanup
+        try:
+            import shutil
+
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        except Exception:
+            pass
 
     if failures:
         print(f"\n[smoke] FAILED ({len(failures)} failures):")

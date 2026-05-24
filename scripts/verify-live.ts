@@ -1,5 +1,5 @@
 // One-command live-FL verification. Probes every entry in the FL-side
-// DISPATCH table (88 methods) via the same SocketBridge the MCP server uses
+// DISPATCH table (88 methods) via the same FileBridge the MCP server uses
 // in production, classifies each result, and emits docs/LIVE-VERIFY-REPORT.md.
 //
 // Usage:
@@ -7,64 +7,48 @@
 //   npx tsx scripts/verify-live.ts --include-writes   // opt-in to mutating calls
 //
 // Behaviour summary:
-//   1. Wait-for-bridge loop: poll 127.0.0.1:9876 every 1 sec for up to 60 sec.
-//   2. Connect via SocketBridge (production transport, not a reimplementation).
+//   1. Wait-for-bridge loop: poll the IPC heartbeat file (`bridge_alive.txt`
+//      written by FL's OnInit) every 1 sec for up to 60 sec.
+//   2. Connect via FileBridge (production transport, not a reimplementation).
 //   3. Probe every method with safe default args, grouped by module.
-//   4. Print a per-method line (✅ / ❌ / ⏭️) and a per-module summary table.
+//   4. Print a per-method line (ok / fail / skip) and a per-module summary.
 //   5. Write docs/LIVE-VERIFY-REPORT.md with the full result table and
 //      suggested fixes for failures (looked up in the bridge-contract-audit).
-//   6. Exit 0 if everything ran green, 1 on any ❌, 2 if bridge unreachable.
+//   6. Exit 0 if everything ran green, 1 on any failure, 2 if bridge unreachable.
 
-import { writeFileSync, mkdirSync } from "node:fs";
-import { Socket } from "node:net";
+import { writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "../src/config.js";
-import { SocketBridge } from "../src/bridge/socket.js";
+import { DEFAULT_IPC_DIR, FileBridge, isBridgeAlive } from "../src/bridge/file_ipc.js";
 import { BridgeError } from "../src/bridge/types.js";
 
 // ---------------------------------------------------------------------------
-// Wait-for-bridge loop
+// Wait-for-bridge loop. The file-IPC bridge is "alive" when:
+//   (a) the IPC folder exists on disk, AND
+//   (b) FL has written `bridge_alive.txt` into it during OnInit.
+// If only (a) is true the device script never got loaded, so the user
+// hasn't completed the FL-side setup yet.
 // ---------------------------------------------------------------------------
 
 const WAIT_TIMEOUT_SECONDS = 60;
 const WAIT_INTERVAL_MS = 1000;
 
-async function probeBridge(host: string, port: number, timeoutMs: number): Promise<boolean> {
-  return new Promise((res) => {
-    const sock = new Socket();
-    let settled = false;
-    const t = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      sock.destroy();
-      res(false);
-    }, timeoutMs);
-    sock.once("connect", () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(t);
-      sock.destroy();
-      res(true);
-    });
-    sock.once("error", () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(t);
-      sock.destroy();
-      res(false);
-    });
-    sock.connect(port, host);
-  });
-}
-
-async function waitForBridge(host: string, port: number): Promise<boolean> {
+async function waitForBridge(ipcDir: string): Promise<boolean> {
   process.stdout.write(
-    `[verify] waiting for FL bridge on ${host}:${port} (timeout ${WAIT_TIMEOUT_SECONDS}s).\n`,
+    `[verify] waiting for FL bridge at ${ipcDir} (timeout ${WAIT_TIMEOUT_SECONDS}s).\n`,
   );
+  if (!existsSync(ipcDir)) {
+    process.stdout.write(
+      `[verify] IPC folder does not exist yet. The installer normally creates it; \n` +
+        `[verify] create it manually if needed (mkdir is broken in FL's embedded Python).\n`,
+    );
+  }
   for (let attempt = 1; attempt <= WAIT_TIMEOUT_SECONDS; attempt++) {
-    process.stdout.write(`[verify] connecting... attempt ${attempt}/${WAIT_TIMEOUT_SECONDS}\r`);
-    const up = await probeBridge(host, port, 800);
+    process.stdout.write(
+      `[verify] checking heartbeat... attempt ${attempt}/${WAIT_TIMEOUT_SECONDS}\r`,
+    );
+    const up = await isBridgeAlive(ipcDir);
     if (up) {
       process.stdout.write(`\n[verify] bridge live, starting verification...\n`);
       return true;
@@ -406,7 +390,6 @@ function shouldSkip(probe: Probe, includeWrites: boolean): boolean {
 
 function classifyError(message: string): { status: Status; hint?: string } {
   if (/timed out/i.test(message)) return { status: "timeout" };
-  // AttributeError surfaces from the FL side as "AttributeError: module 'X' has no attribute 'Y'"
   return { status: "fail" };
 }
 
@@ -424,7 +407,7 @@ function fmtValue(v: unknown): string {
   return String(v);
 }
 
-async function runProbe(bridge: SocketBridge, probe: Probe, skipped: boolean): Promise<Result> {
+async function runProbe(bridge: FileBridge, probe: Probe, skipped: boolean): Promise<Result> {
   if (skipped) {
     return {
       method: probe.method,
@@ -462,16 +445,16 @@ async function runProbe(bridge: SocketBridge, probe: Probe, skipped: boolean): P
 // Reporting
 // ---------------------------------------------------------------------------
 
-function statusEmoji(s: Status): string {
+function statusLabel(s: Status): string {
   switch (s) {
     case "ok":
-      return "✅";
+      return "ok";
     case "fail":
-      return "❌";
+      return "FAIL";
     case "timeout":
-      return "🟡";
+      return "TIMEOUT";
     case "skip":
-      return "⏭️";
+      return "skip";
   }
 }
 
@@ -515,15 +498,15 @@ function printSummary(results: Result[]): void {
     const b = byModule.get(mod);
     if (!b) continue;
     process.stdout.write(
-      `[verify]   ${mod.padEnd(11)} : ${b.ok} ✅ / ${b.fail} ❌ / ${b.timeout} 🟡 / ${b.skip} ⏭️\n`,
+      `[verify]   ${mod.padEnd(11)} : ${b.ok} ok / ${b.fail} fail / ${b.timeout} timeout / ${b.skip} skip\n`,
     );
     for (const r of results) {
       if (r.module !== mod || r.status !== "fail") continue;
-      process.stdout.write(`[verify]     ❌ ${r.method} — ${r.error}\n`);
+      process.stdout.write(`[verify]     FAIL ${r.method} — ${r.error}\n`);
     }
   }
   process.stdout.write(
-    `[verify] OVERALL: ${totals.ok} ✅ / ${totals.fail} ❌ / ${totals.timeout} 🟡 / ${totals.skip} ⏭️\n`,
+    `[verify] OVERALL: ${totals.ok} ok / ${totals.fail} fail / ${totals.timeout} timeout / ${totals.skip} skip\n`,
   );
 }
 
@@ -540,16 +523,17 @@ async function writeReport(
   lines.push(`- **Timestamp:** ${new Date().toISOString()}`);
   lines.push(`- **FL version:** ${flVersion ?? "unknown (ui.getVersion not available)"}`);
   lines.push(`- **Include writes:** ${includeWrites ? "yes" : "no"}`);
+  lines.push(`- **Transport:** file-IPC (mode="file")`);
   lines.push(``);
   lines.push(`## Totals`);
   lines.push(``);
   lines.push(
-    `${totals.ok} ✅ ok / ${totals.fail} ❌ fail / ${totals.timeout} 🟡 timeout / ${totals.skip} ⏭️ skipped (total ${results.length})`,
+    `${totals.ok} ok / ${totals.fail} fail / ${totals.timeout} timeout / ${totals.skip} skipped (total ${results.length})`,
   );
   lines.push(``);
   lines.push(`## Per-module summary`);
   lines.push(``);
-  lines.push(`| Module | ✅ | ❌ | 🟡 | ⏭️ |`);
+  lines.push(`| Module | ok | fail | timeout | skip |`);
   lines.push(`| --- | --- | --- | --- | --- |`);
   for (const mod of MODULE_ORDER) {
     const b = byModule.get(mod);
@@ -571,7 +555,7 @@ async function writeReport(
             : "skipped (write-side; --include-writes to test)"
           : (r.error ?? "");
     const escaped = detail.replace(/\|/g, "\\|").replace(/\n/g, " ");
-    lines.push(`| ${statusEmoji(r.status)} | \`${r.method}\` | ${escaped} |`);
+    lines.push(`| ${statusLabel(r.status)} | \`${r.method}\` | ${escaped} |`);
   }
   lines.push(``);
   const failures = results.filter((r) => r.status === "fail");
@@ -607,26 +591,24 @@ function parseArgs(argv: string[]): { includeWrites: boolean } {
 async function main(): Promise<number> {
   const { includeWrites } = parseArgs(process.argv.slice(2));
   const config = loadConfig();
-  const host = config.bridge.host;
-  const port = config.bridge.port;
+  const ipcDir = config.bridge.ipcDir ?? DEFAULT_IPC_DIR;
 
-  const up = await waitForBridge(host, port);
+  const up = await waitForBridge(ipcDir);
   if (!up) {
     process.stdout.write(
-      `[verify] FAILED: bridge not reachable on ${host}:${port} after ${WAIT_TIMEOUT_SECONDS}s.\n` +
+      `[verify] FAILED: bridge not reachable at ${ipcDir} after ${WAIT_TIMEOUT_SECONDS}s.\n` +
         `[verify] See docs/INSTALL.md for FL Studio device-script setup.\n`,
     );
     return 2;
   }
 
-  const bridge = new SocketBridge({
-    host,
-    port,
-    connectTimeoutMs: config.bridge.connectTimeoutMs,
+  const bridge = new FileBridge({
+    ipcDir,
     // verify-live needs a generous per-call budget because some probes
     // (e.g. peaks, plugin params) can stall on idle ticks at the upper
-    // end of the Q5 OnIdle cadence.
-    requestTimeoutMs: Math.max(config.bridge.requestTimeoutMs, 2000),
+    // end of the Q5 OnIdle cadence. File-IPC also adds the poll-interval
+    // latency so we bump higher than the config default.
+    requestTimeoutMs: Math.max(config.bridge.requestTimeoutMs, 3000),
   });
 
   // Best-effort FL version. Not in the DISPATCH table, so it might be
@@ -651,17 +633,17 @@ async function main(): Promise<number> {
     const r = await runProbe(bridge, probe, skipped);
     results.push(r);
     if (r.status === "ok") {
-      process.stdout.write(`✅ ${fmtValue(r.value)}\n`);
+      process.stdout.write(`ok ${fmtValue(r.value)}\n`);
     } else if (r.status === "skip") {
       const reason =
         probe.kind === "audible"
           ? "audible; --include-writes to test"
           : "write; --include-writes to test";
-      process.stdout.write(`⏭️ skipped (${reason})\n`);
+      process.stdout.write(`skip (${reason})\n`);
     } else if (r.status === "timeout") {
-      process.stdout.write(`🟡 timeout — ${r.error}\n`);
+      process.stdout.write(`TIMEOUT — ${r.error}\n`);
     } else {
-      process.stdout.write(`❌ ${r.error}\n`);
+      process.stdout.write(`FAIL ${r.error}\n`);
     }
   }
 

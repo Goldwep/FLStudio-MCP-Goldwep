@@ -1,54 +1,65 @@
 # name=FLStudio MCP Bridge
 # url=https://github.com/Goldwep/FLStudio-MCP-Goldwep
-# version 0.9.1-pre-bridge
+# version 0.9.2-file-ipc
 """
 FL Studio MIDI device script -- in-FL half of the MCP bridge.
 
 Architecture lock (see docs/PROBE-REPORT.md for empirical justification):
 
-  * SINGLE-THREADED, non-blocking TCP socket polled from OnIdle.
-    FL's embedded Python is a sub-interpreter with daemon threads
-    explicitly disabled. We cannot spawn a socket-accept thread.
+  * FILE-BASED IPC, NOT SOCKETS. Live-FL integration on 2026-05-24 found
+    that socket.socket() returns SystemError "NULL without setting an
+    exception" for every socket type (TCP/UDP/_socket) in FL's embedded
+    Python 3.12.1 sub-interpreter. We pivoted to a file-IPC channel:
+        Node writes  req_<id>.json   to ipc/
+        FL reads + dispatches + writes resp_<id>.json
+        Node polls + reads + unlinks resp_<id>.json
+    Same single-threaded OnIdle pump as before; the framing changed.
 
-  * NO __file__ resolution. FL exec's device scripts rather than importing
-    them as modules, so __file__ is not defined. We derive paths from the
-    user's home directory via os.path.expanduser("~").
+  * SINGLE-THREADED OnIdle pump. FL's embedded Python is a sub-interpreter
+    with daemon threads explicitly disabled. We cannot spawn workers; the
+    only execution surface for the bridge is the OnIdle callback FL itself
+    drives at ~50ms p50 / ~86ms p99.
 
-  * NO os.replace() / Path.rename(). The atomic-rename pattern returns NULL
-    without setting an exception on Windows in FL's embedded Python. We
-    write directly to the final filename and accept partial-write risk on
-    crash (mitigation: ring-buffer for state that needs crash-resilience).
+  * NO mkdir / makedirs / pathlib.mkdir. All three return NULL-without-
+    exception in this interpreter, even with exist_ok=True against an
+    existing directory. The IPC folder must be pre-created externally
+    (the installer creates it before FL ever loads this script).
+
+  * NO os.replace / Path.rename. Atomic-rename pattern also broken. Write
+    directly to the final filename; accept partial-write risk on crash.
+
+  * NO logging module FileHandler -- it calls os.makedirs internally and
+    will hit the broken mkdir. Direct open(LOG_PATH, "a").write() instead.
+
+  * NO __file__. FL exec's device scripts rather than importing them, so
+    __file__ is undefined. Paths derive from os.path.expanduser("~").
 
   * NO trust in OnDeInit. Reload Script does NOT fire OnDeInit on the prior
-    instance, so socket cleanup happens defensively on OnInit:
-    SO_REUSEADDR plus force-close-any-prior-server.
+    instance, so any cleanup happens defensively on OnInit (drain leftover
+    request files from the IPC folder).
 
-  * OnIdle cadence is ~50ms p50, ~86ms p99 (NOT 20ms). Per-request budget
-    is ~750ms (10x p99). Up to 16 requests are processed per OnIdle tick
-    to avoid stalling FL.
+  * OnIdle cadence ~50ms p50, ~86ms p99. We cap at 8 requests per tick to
+    avoid stalling FL's callback thread on a flood.
 
-Wire protocol: newline-delimited JSON-RPC. Each request is one line of:
+Wire protocol: one JSON object per file. Each request:
 
-    {"id": <any>, "method": "module.method", "args": { ... }}
+    ipc/req_<id>.json: {"id": <any>, "method": "module.method", "args": {...}}
 
-Each response is one line of:
+Each response:
 
-    {"id": <same>, "ok": true,  "result": <value>}              -- success
-    {"id": <same>, "ok": false, "error": "<class>: <msg>",      -- failure
-                              "traceback": "<full traceback>"}
+    ipc/resp_<id>.json: {"id": <same>, "ok": true,  "result": <value>}
+    ipc/resp_<id>.json: {"id": <same>, "ok": false, "error": "<class>: <msg>",
+                                       "traceback": "<full traceback>"}
 
-The DISPATCH table below covers every bridge.call("X.Y", args) issued from
-src/tools/*.ts. Bridge-internal primitives ("ping", "state.*") are NOT FL
-API calls -- they are MCP-side helpers implemented locally in this file.
+The DISPATCH table at the bottom covers every bridge.call("X.Y", args)
+issued from src/tools/*.ts. Bridge-internal primitives ("ping", "state.*")
+are NOT FL API calls -- they are MCP-side helpers implemented locally.
 """
 
 import json
-import logging
 import os
-import socket
 import time
 import traceback
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 # FL-injected modules. These only exist when this script is exec'd inside
@@ -67,7 +78,7 @@ import ui
 import midi
 
 # ----------------------------------------------------------------------
-# Paths and logging
+# Paths
 # ----------------------------------------------------------------------
 
 _USER_HOME = os.path.expanduser("~")
@@ -80,39 +91,34 @@ SCRIPT_DIR = (
     / "Hardware"
     / "FLStudio-MCP"
 )
+IPC_DIR = SCRIPT_DIR / "ipc"
 LOG_PATH = SCRIPT_DIR / "bridge.log"
-
-log = logging.getLogger("flstudio-mcp-bridge")
-log.setLevel(logging.INFO)
-log.propagate = False
-_log_handler_installed = False
+HEARTBEAT_PATH = IPC_DIR / "bridge_alive.txt"
 
 
-def _install_log_handler():
-    """Install a rotating file handler once SCRIPT_DIR exists.
+# ----------------------------------------------------------------------
+# Logging -- direct open()+write(), no FileHandler (FileHandler calls
+# os.makedirs internally which is broken in FL's embedded Python).
+# ----------------------------------------------------------------------
 
-    Idempotent -- multiple OnInit calls (FL re-exec's the script on Reload
-    without firing OnDeInit, see Q4 in PROBE-REPORT.md) must not stack
-    handlers.
-    """
-    global _log_handler_installed
-    if _log_handler_installed:
-        return
+
+def _log(level, msg):
+    """Append a single timestamped line to LOG_PATH. Best-effort."""
+    line = "%s %s %s\n" % (
+        time.strftime("%Y-%m-%d %H:%M:%S"),
+        level,
+        msg,
+    )
+    # print() reaches FL's Script Output tab so the user sees errors
+    # even if the log file is unwritable.
+    if level in ("WARN", "ERROR"):
+        print("[mcp-bridge] %s %s" % (level, msg))
     try:
-        SCRIPT_DIR.mkdir(parents=True, exist_ok=True)
-        handler = RotatingFileHandler(
-            str(LOG_PATH), maxBytes=512 * 1024, backupCount=2, encoding="utf-8"
-        )
-        handler.setFormatter(
-            logging.Formatter(
-                "%(asctime)s %(levelname)s %(message)s",
-                datefmt="%Y-%m-%d %H:%M:%S",
-            )
-        )
-        log.addHandler(handler)
-        _log_handler_installed = True
-    except Exception as exc:  # pragma: no cover -- best-effort
-        print(f"[mcp-bridge] log handler install failed: {exc}")
+        with open(str(LOG_PATH), "a", encoding="utf-8") as fh:
+            fh.write(line)
+    except Exception:
+        # Best-effort -- a logging failure must never break the dispatch loop.
+        pass
 
 
 # ----------------------------------------------------------------------
@@ -120,19 +126,10 @@ def _install_log_handler():
 #
 # FL's "Reload Script" re-exec's the script body but does NOT clear the
 # module dict, so any name already bound here survives the reload. This
-# is the foundation of the Q4 (no-OnDeInit-on-reload) survival pattern:
-# we test for an existing _server on OnInit and close it before binding
-# a fresh one.
+# is the foundation of the Q4 (no-OnDeInit-on-reload) survival pattern.
 # ----------------------------------------------------------------------
 
-HOST = "127.0.0.1"
-PORT = 9876
-MAX_REQUESTS_PER_TICK = 16
-RECV_CHUNK = 4096
-LISTEN_BACKLOG = 8
-
-_server = None  # type: ignore  -- socket.socket or None
-_conns = []  # list[dict]: {"sock": socket, "buf": bytes, "addr": tuple}
+MAX_REQUESTS_PER_TICK = 8
 
 # State-sync subscription (L8b primitives).
 _subscribed = False
@@ -155,130 +152,122 @@ _CE_FLAG_NAMES = {
 
 
 def OnInit():
-    """Bind the listen socket. Defensive against Reload Script (no OnDeInit)."""
-    global _server, _conns
-    _install_log_handler()
-    log.info("OnInit fired")
+    """Initialize bridge. Defensive against Reload Script (no OnDeInit)."""
+    _log("INFO", "OnInit fired (file-IPC bridge)")
+    _log("INFO", "IPC dir: %s" % IPC_DIR)
 
-    # Drop any sockets left over from a previous exec of this script.
-    if _server is not None:
-        try:
-            _server.close()
-        except Exception:
-            pass
-        _server = None
-    for entry in _conns:
-        try:
-            entry["sock"].close()
-        except Exception:
-            pass
-    _conns = []
+    # The IPC folder MUST already exist -- the installer creates it. We
+    # cannot create it here (mkdir is broken). Verify presence + log clearly
+    # if it is missing so the user knows what to do.
+    if not os.path.isdir(str(IPC_DIR)):
+        _log(
+            "ERROR",
+            "IPC directory does not exist: %s -- please create it manually "
+            "(mkdir is broken in FL's embedded Python; the installer "
+            "normally pre-creates it)." % IPC_DIR,
+        )
+        return
 
+    # Drop any leftover req_* and resp_* files from a previous exec. A stale
+    # response could otherwise satisfy a fresh Node request with the wrong
+    # data; a stale request would get re-dispatched against fresh state.
+    drained = _cleanup_ipc_dir()
+    _log("INFO", "OnInit: drained %d leftover ipc files" % drained)
+
+    # Write a heartbeat file so Node-side `wait_for_bridge` can detect us
+    # before the first real request. Content is just the start timestamp.
     try:
-        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        srv.setblocking(False)
-        srv.bind((HOST, PORT))
-        srv.listen(LISTEN_BACKLOG)
-        _server = srv
-        msg = f"MCP bridge listening on {HOST}:{PORT}"
-        log.info(msg)
-        print(f"[mcp-bridge] {msg}")
+        with open(str(HEARTBEAT_PATH), "w", encoding="utf-8") as fh:
+            fh.write(str(int(time.time() * 1000)))
     except Exception as exc:
-        log.error(f"OnInit failed: {exc}\n{traceback.format_exc()}")
-        print(f"[mcp-bridge] OnInit failed: {exc}")
+        _log("WARN", "OnInit: could not write heartbeat: %s" % exc)
+
+    msg = "MCP file-IPC bridge ready at %s" % IPC_DIR
+    _log("INFO", msg)
+    print("[mcp-bridge] %s" % msg)
 
 
 def OnDeInit():
     """Best-effort teardown. Does NOT fire on Reload Script (Q4)."""
-    global _server, _conns
-    log.info("OnDeInit fired")
-    for entry in _conns:
-        try:
-            entry["sock"].close()
-        except Exception:
-            pass
-    _conns = []
-    if _server is not None:
-        try:
-            _server.close()
-        except Exception:
-            pass
-        _server = None
+    _log("INFO", "OnDeInit fired")
+    # Best-effort heartbeat removal so a stale heartbeat doesn't fool the
+    # Node side into thinking FL is still up.
+    try:
+        if os.path.isfile(str(HEARTBEAT_PATH)):
+            os.remove(str(HEARTBEAT_PATH))
+    except Exception:
+        pass
 
 
 def OnIdle():
-    """Pump the socket: accept new conns, drain requests, dispatch, reply."""
-    global _conns
+    """Pump the file IPC channel: scan ipc/, dispatch, write responses."""
+    if not os.path.isdir(str(IPC_DIR)):
+        return
 
-    # 1. Accept any pending connections. setblocking(False) means accept()
-    #    raises BlockingIOError when nothing is queued.
-    if _server is not None:
-        while True:
-            try:
-                conn, addr = _server.accept()
-            except BlockingIOError:
-                break
-            except Exception as exc:
-                log.error(f"accept failed: {exc}")
-                break
-            try:
-                conn.setblocking(False)
-                _conns.append({"sock": conn, "buf": b"", "addr": addr})
-                log.debug(f"accepted connection from {addr}")
-            except Exception as exc:
-                log.error(f"post-accept setup failed: {exc}")
-                try:
-                    conn.close()
-                except Exception:
-                    pass
+    try:
+        entries = os.listdir(str(IPC_DIR))
+    except Exception as exc:
+        _log("WARN", "OnIdle: listdir failed: %s" % exc)
+        return
 
-    # 2. Drain incoming data and dispatch. Cap at MAX_REQUESTS_PER_TICK to
-    #    avoid stalling FL's callback thread on a flood.
-    #
-    #    Per-connection recv state has three outcomes:
-    #      * raises BlockingIOError -> no data ready this tick, keep alive
-    #      * returns b""             -> peer closed the connection, drop it
-    #      * returns non-empty bytes -> append to buffer and frame-parse
+    # Filter to request files. We deliberately ignore anything else (resp_*,
+    # bridge_alive.txt, log files, future extensions) so the IPC folder can
+    # safely host non-IPC artifacts.
+    req_names = []
+    for name in entries:
+        if name.startswith("req_") and name.endswith(".json"):
+            req_names.append(name)
+
+    if not req_names:
+        return
+
+    # Stable order so older requests dispatch first even if listdir returns
+    # them out of order. File names embed an incrementing id from the Node
+    # side, so lexical sort is "good enough" (zero-padded numeric would be
+    # strictly correct, but ids reset to 1 per process so lexical works
+    # within a single Node session).
+    req_names.sort()
+
     processed = 0
-    for entry in list(_conns):
+    for name in req_names:
         if processed >= MAX_REQUESTS_PER_TICK:
             break
-        sock = entry["sock"]
+        req_path = IPC_DIR / name
 
-        peer_closed = False
+        # Read + delete + dispatch + write response. If anything fails we
+        # try hard to delete the request file so we don't get stuck looping
+        # on a poison request.
+        raw = None
         try:
-            chunk = sock.recv(RECV_CHUNK)
-            if chunk == b"":
-                peer_closed = True
-            else:
-                entry["buf"] += chunk
-        except BlockingIOError:
-            pass  # no data ready; keep the connection alive
+            with open(str(req_path), "r", encoding="utf-8") as fh:
+                raw = fh.read()
         except Exception as exc:
-            log.error(f"recv failed: {exc}")
-            _drop_conn(entry)
+            _log("WARN", "OnIdle: could not read %s: %s" % (name, exc))
+            _safe_remove(req_path)
             continue
 
-        # Process every newline-terminated frame in the buffer.
-        while b"\n" in entry["buf"]:
-            if processed >= MAX_REQUESTS_PER_TICK:
-                break
-            line, _, entry["buf"] = entry["buf"].partition(b"\n")
-            if not line.strip():
-                continue
-            response = _handle_request(line)
-            try:
-                sock.sendall(response + b"\n")
-            except Exception as exc:
-                log.error(f"send failed: {exc}")
-                _drop_conn(entry)
-                peer_closed = False  # already dropped
-                break
-            processed += 1
+        # Delete the request file BEFORE dispatching. If the handler raises
+        # or stalls, the request is already off the queue -- it won't be
+        # picked up again on the next tick. The cost: if FL crashes mid-
+        # dispatch, the request is lost and the Node caller will time out.
+        _safe_remove(req_path)
 
-        if peer_closed:
-            _drop_conn(entry)
+        response_bytes, req_id = _handle_request(raw)
+
+        # Write the response file. Node polls for resp_<id>.json with the
+        # matching id; if the write fails we log and move on (the caller
+        # will time out, which is the correct surface).
+        resp_path = IPC_DIR / ("resp_%s.json" % _id_for_filename(req_id))
+        try:
+            with open(str(resp_path), "w", encoding="utf-8") as fh:
+                fh.write(response_bytes.decode("utf-8"))
+        except Exception as exc:
+            _log(
+                "ERROR",
+                "OnIdle: could not write %s: %s" % (resp_path.name, exc),
+            )
+
+        processed += 1
 
 
 def OnMidiMsg(event):
@@ -299,7 +288,7 @@ def OnDirtyChannel(index, flag=0):
                 "kind": "channel",
                 "index": index,
                 "flag": flag,
-                "flag_name": _CE_FLAG_NAMES.get(flag, f"CE_{flag}"),
+                "flag_name": _CE_FLAG_NAMES.get(flag, "CE_%s" % flag),
             }
         )
 
@@ -320,21 +309,43 @@ def OnUpdateBeatIndicator(value):
 
 
 # ----------------------------------------------------------------------
-# Connection management helpers
+# IPC helpers
 # ----------------------------------------------------------------------
 
 
-def _drop_conn(entry):
-    """Close and forget a connection."""
-    global _conns
+def _cleanup_ipc_dir():
+    """Drop leftover req_*.json + resp_*.json from a previous session."""
+    if not os.path.isdir(str(IPC_DIR)):
+        return 0
     try:
-        entry["sock"].close()
+        names = os.listdir(str(IPC_DIR))
     except Exception:
-        pass
+        return 0
+    removed = 0
+    for name in names:
+        if (name.startswith("req_") or name.startswith("resp_")) and name.endswith(".json"):
+            if _safe_remove(IPC_DIR / name):
+                removed += 1
+    return removed
+
+
+def _safe_remove(path):
+    """Best-effort file removal. Returns True if file is gone afterward."""
     try:
-        _conns.remove(entry)
-    except ValueError:
-        pass
+        os.remove(str(path))
+        return True
+    except FileNotFoundError:
+        return True
+    except Exception as exc:
+        _log("WARN", "remove failed for %s: %s" % (path, exc))
+        return False
+
+
+def _id_for_filename(req_id):
+    """Render a request id as a filename-safe string."""
+    if req_id is None:
+        return "null"
+    return str(req_id)
 
 
 # ----------------------------------------------------------------------
@@ -343,40 +354,63 @@ def _drop_conn(entry):
 
 
 def _handle_request(raw):
-    """Parse one JSON-RPC request, dispatch, return JSON-encoded response bytes."""
-    req = None
+    """
+    Parse one JSON-RPC request, dispatch, return (response_bytes, req_id).
+
+    Returning the req_id alongside the response lets the OnIdle pump pick
+    the correct resp_<id>.json filename even when the request payload was
+    malformed (best-effort fallback to "null").
+    """
     req_id = None
     try:
-        req = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+        req = json.loads(raw)
         if not isinstance(req, dict):
-            return _err_response(None, "BadRequest: payload must be a JSON object")
+            return (
+                _err_response(None, "BadRequest: payload must be a JSON object"),
+                None,
+            )
         req_id = req.get("id")
         method = req.get("method")
         if not isinstance(method, str):
-            return _err_response(req_id, "BadRequest: missing 'method' string")
+            return (
+                _err_response(req_id, "BadRequest: missing 'method' string"),
+                req_id,
+            )
         args = req.get("args") or {}
         if not isinstance(args, dict):
-            return _err_response(req_id, "BadRequest: 'args' must be an object")
+            return (
+                _err_response(req_id, "BadRequest: 'args' must be an object"),
+                req_id,
+            )
         handler = DISPATCH.get(method)
         if handler is None:
-            return _err_response(req_id, f"UnknownMethod: {method}")
+            return (
+                _err_response(req_id, "UnknownMethod: %s" % method),
+                req_id,
+            )
         try:
             result = handler(**args)
         except TypeError as exc:
             # Argument-shape mismatch -- include the method name so the
             # MCP server can diff its bridge.call signature against this
             # handler's positional arguments.
-            return _err_response(
+            return (
+                _err_response(
+                    req_id,
+                    "BadArgs in %s: %s" % (method, exc),
+                    traceback.format_exc(),
+                ),
                 req_id,
-                f"BadArgs in {method}: {exc}",
-                traceback.format_exc(),
             )
-        return _ok_response(req_id, result)
+        return (_ok_response(req_id, result), req_id)
     except Exception as exc:
-        return _err_response(
+        return (
+            _err_response(
+                req_id,
+                "%s: %s" % (type(exc).__name__, exc),
+                traceback.format_exc(),
+            ),
             req_id,
-            f"{type(exc).__name__}: {exc}",
-            traceback.format_exc(),
         )
 
 

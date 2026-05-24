@@ -1,6 +1,6 @@
 # L0 Probe Report — Architecture Lock
 
-> **Status:** **EMPIRICAL DATA LANDED (2026-05-23).** Probe ran inside FL Studio Producer Edition v24.2.2 build 4597 using bundled Python 3.12.1, FL MIDI Scripting API version 37. Raw data preserved at [PROBE-RESULTS.json](./PROBE-RESULTS.json) and [PROBE-LOG.txt](./PROBE-LOG.txt). 4 of 7 questions answered definitively, 3 untestable in this run, 1 bonus finding.
+> **Status:** **EMPIRICAL DATA LANDED (2026-05-23 + 2026-05-24 socket update).** Probe ran inside FL Studio Producer Edition v24.2.2 build 4597 using bundled Python 3.12.1, FL MIDI Scripting API version 37. Raw data preserved at [PROBE-RESULTS.json](./PROBE-RESULTS.json), [PROBE-LOG.txt](./PROBE-LOG.txt), and [PROBE-SOCKET-RESULTS.txt](./PROBE-SOCKET-RESULTS.txt). 4 of 7 questions answered definitively, 3 untestable in this run, 1 bonus finding — plus the 2026-05-24 socket-creation finding that pivoted the transport from TCP to file-IPC. See [Update: socket creation also blocked](#update-socket-creation-also-blocked-2026-05-24).
 
 ## 0. Environment
 
@@ -203,3 +203,42 @@ Confirmed by `probe_results.json.tmp` existing on disk but `probe_results.json` 
 6. Tag `v1.0.0` for real
 
 Estimated calendar: ~1 week from here. Most of the 109-tool surface starts working immediately once the bridge handles the dispatch.
+
+## Update: socket creation also blocked (2026-05-24)
+
+Live integration attempt revealed an even more fundamental issue than Q1's threading lock-out: **socket creation itself is blocked** in FL's embedded Python sub-interpreter. Empirical results from the socket-test probe (raw log preserved at [`PROBE-SOCKET-RESULTS.txt`](./PROBE-SOCKET-RESULTS.txt)):
+
+```
+PASS import socket: <module 'socket' from '...\\python312.zip\\socket.pyc'>
+PASS socket constants: AF_INET=<AddressFamily.AF_INET: 2>, SOCK_STREAM=<SocketKind.SOCK_STREAM: 1>
+FAIL socket() default: SystemError: <slot wrapper '__init__' of '_socket.socket' objects> returned NULL without setting an exception
+FAIL socket(AF_INET, SOCK_STREAM): SystemError: <slot wrapper '__init__' of '_socket.socket' objects> returned NULL without setting an exception
+FAIL create_server: SystemError: ... returned NULL without setting an exception
+FAIL socket UDP: SystemError: ... returned NULL without setting an exception
+FAIL _socket.socket: SystemError: <class '_socket.socket'> returned NULL without setting an exception
+FAIL pathlib.mkdir: SystemError: <built-in function mkdir> returned NULL without setting an exception
+FAIL os.makedirs: SystemError: <built-in function mkdir> returned NULL without setting an exception
+```
+
+Every socket family (TCP/UDP/low-level `_socket.socket`) returns `SystemError: NULL without setting an exception`. The `socket` module imports cleanly and exposes its constants; only the actual `socket()` constructor is broken. Same NULL-without-exception failure also affects `os.mkdir`, `os.makedirs`, and `pathlib.Path.mkdir`, even with `exist_ok=True` against a directory that already exists.
+
+This kills the TCP socket bridge entirely. **Architecture pivots to file-based IPC:**
+
+- Node writes `req_<id>.json` to a shared `ipc/` folder
+- FL reads + dispatches via `OnIdle` + writes `resp_<id>.json`
+- Node polls + reads + unlinks the response file
+
+~25-50ms additional latency vs the socket bridge (one extra poll cycle) but otherwise equivalent. The 88-entry DISPATCH table is unchanged; only the framing flipped from newline-delimited JSON over TCP to one-JSON-object-per-file in a shared folder.
+
+The `mkdir` failure means the IPC folder must be **pre-created externally** — the device script verifies presence on `OnInit` and logs a clear error if missing, but cannot create it itself. Installer responsibility.
+
+### Updated architecture decisions (2026-05-24 supersedes table above)
+
+| Decision                                                                 | Locked? | Rationale                                                                                                                                                        |
+| ------------------------------------------------------------------------ | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Transport: **file-IPC primary**, socket kept dormant for future fix      | ✅ Yes  | `socket.socket()` returns NULL-without-exception in FL's embedded Python. File IPC is the only working transport on this build.                                  |
+| Dispatch: still single-threaded, polled from OnIdle                      | ✅ Yes  | Q1 + Q5 reasoning unchanged. File-IPC just swaps the read/write primitive from socket recv/send to `os.listdir` + `open()`.                                      |
+| IPC folder creation: **external (installer)**                            | ✅ Yes  | `os.mkdir` / `pathlib.mkdir` / `os.makedirs` all broken. Device script verifies the folder exists; logs error if missing.                                        |
+| Per-request timeout: **1500ms** (Node default)                           | ✅ Yes  | ~17× Q5 p99 plus margin for the extra poll-interval latency (file IPC adds at most one 25ms poll vs the socket bridge's instant push).                           |
+| Logging: **direct `open(path, "a").write()`**, NOT `logging.FileHandler` | ✅ Yes  | `FileHandler.__init__` calls `os.makedirs` internally, which is broken. Direct file appends sidestep this entirely.                                              |
+| Heartbeat: `ipc/bridge_alive.txt` written on OnInit                      | ✅ Yes  | Node-side `wait_for_bridge` needs a positive signal that FL actually loaded the script. Heartbeat removes the "folder exists but script never loaded" ambiguity. |

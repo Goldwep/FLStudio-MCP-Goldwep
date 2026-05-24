@@ -1,0 +1,17 @@
+============================================================
+OnInit start, Python 3.12.1 (tags/v3.12.1:2305ca5, Dec  7 2023, 22:03:25) [MSC v.1937 64 bit (AMD64)]
+PASS import socket: <module 'socket' from 'C:\\Program Files\\Image-Line\\FL Studio 2024\\Shared\\Python\\python312.zip\\socket.pyc'>
+PASS socket constants: AF_INET=<AddressFamily.AF_INET: 2>, SOCK_STREAM=<SocketKind.SOCK_STREAM: 1>
+FAIL socket() default: SystemError: <slot wrapper '__init__' of '_socket.socket' objects> returned NULL without setting an exception
+Traceback (most recent call last):
+  File "<string>", line 45, in OnInit
+  File "socket.py", line 233, in __init__
+SystemError: <slot wrapper '__init__' of '_socket.socket' objects> returned NULL without setting an exception
+
+FAIL socket(AF_INET, SOCK_STREAM): SystemError: <slot wrapper '__init__' of '_socket.socket' objects> returned NULL without setting an exception
+FAIL create_server: SystemError: <slot wrapper '__init__' of '_socket.socket' objects> returned NULL without setting an exception
+FAIL socket UDP: SystemError: <slot wrapper '__init__' of '_socket.socket' objects> returned NULL without setting an exception
+FAIL _socket.socket: SystemError: <class '_socket.socket'> returned NULL without setting an exception
+FAIL pathlib.mkdir: SystemError: <built-in function mkdir> returned NULL without setting an exception
+FAIL os.makedirs: SystemError: <built-in function mkdir> returned NULL without setting an exception
+OnInit complete
