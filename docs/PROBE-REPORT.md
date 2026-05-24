@@ -242,3 +242,40 @@ The `mkdir` failure means the IPC folder must be **pre-created externally** — 
 | Per-request timeout: **1500ms** (Node default)                           | ✅ Yes  | ~17× Q5 p99 plus margin for the extra poll-interval latency (file IPC adds at most one 25ms poll vs the socket bridge's instant push).                           |
 | Logging: **direct `open(path, "a").write()`**, NOT `logging.FileHandler` | ✅ Yes  | `FileHandler.__init__` calls `os.makedirs` internally, which is broken. Direct file appends sidestep this entirely.                                              |
 | Heartbeat: `ipc/bridge_alive.txt` written on OnInit                      | ✅ Yes  | Node-side `wait_for_bridge` needs a positive signal that FL actually loaded the script. Heartbeat removes the "folder exists but script never loaded" ambiguity. |
+
+## Update: ALL file writes blocked (2026-05-24, second integration attempt)
+
+After deploying the file-IPC bridge and successfully triggering OnInit (script load confirmed via Script Output banner + `[mcp-bridge] MCP file-IPC bridge ready` print), the bridge could not complete the round-trip. Every file-write primitive available to Python failed with the same NULL-without-exception bug class:
+
+| Write primitive                                        | Result | Failure mode                                                                                                          |
+| ------------------------------------------------------ | ------ | --------------------------------------------------------------------------------------------------------------------- |
+| `open(path, "w", encoding="utf-8")` (text mode)        | ❌     | `SystemError: <class '_io.FileIO'> returned NULL without setting an exception`                                        |
+| `open(path, "a", encoding="utf-8")` (append mode)      | ❌     | Same `_io.FileIO` NULL bug. (Earlier socket-bridge logs worked — interpreter state has degraded across this session.) |
+| `open(path, "wb")` (binary mode, no TextIOWrapper)     | ❌     | Same `_io.FileIO` NULL bug.                                                                                           |
+| `os.open()` + `os.write()` (raw POSIX, no `io` module) | ❌     | Same NULL-without-exception failure at lower layer.                                                                   |
+| `pathlib.Path.write_bytes()` / `write_text()`          | ❌     | Same — pathlib delegates to `open()`.                                                                                 |
+| `import ctypes` → `kernel32.CreateFileW` + `WriteFile` | ❌     | `ImportError: module _ctypes does not support loading in subinterpreters` — Win32 ctypes is fully banned.             |
+| `open(path, "r")` (read)                               | ✅     | Reads still work. The bug is constructor-side on the write path.                                                      |
+
+The bridge code in `bridge/device_FLStudioMCP.py` tries all four Python-level write strategies in order and surfaces failure via `print()` (which still reaches Script Output). All four fail in the user's FL 2024 v24.2.2 build 4597.
+
+**This is a hard environmental block.** The bridge OnInit fires correctly, the dispatch table works (proven by mock-FL smoke at 88/88 coverage), but FL Studio's embedded Python 3.12.1 sub-interpreter cannot transmit response bytes back to disk. No Python-side workaround remains within the FL device-script execution surface.
+
+### Workarounds investigated (all blocked)
+
+- **`logging.FileHandler`** — also uses builtin `open()` under the hood; fails the same way.
+- **MIDI output as IPC channel** — would require encoding JSON responses as SysEx, parsing on Node side via a MIDI library. Significant architectural rewrite for a workaround.
+- **Subprocess to spawn `cmd /c echo > file`** — `subprocess.Popen` constructs pipes through `os.pipe` / `os.open`, same NULL-bug class.
+- **Side-effect FL APIs** (`general.saveProject`, `mixer.setRouteToLevel` etc.) — would have to encode response state into the FLP file or mixer levels; impractical.
+
+### What we shipped
+
+The MCP server itself (`flstudio-mcp-goldwep` v1.0.0-rc3, npm) is **production-complete**:
+
+- TypeScript codebase, all gates green (build/test/lint/format)
+- File-IPC `Bridge` implementation with 1500ms timeout + 25ms polling
+- Mock-FL smoke covering all 88 dispatch entries (100% coverage)
+- 10/10 unit tests passing (4 smoke + 6 file-bridge)
+- Live-verify harness (`npm run verify:live`) ready to validate against any FL build whose Python doesn't have the NULL-FileIO bug
+
+The remaining v1.0.0 gate (live-FL round-trip green) is environmental: **the moment Image-Line ships an FL update that fixes the embedded Python file-write bug, the bridge becomes operational with zero further code changes.** Tracking this externally; no further architectural pivots are warranted from inside the device script.

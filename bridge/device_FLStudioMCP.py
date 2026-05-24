@@ -97,28 +97,154 @@ HEARTBEAT_PATH = IPC_DIR / "bridge_alive.txt"
 
 
 # ----------------------------------------------------------------------
-# Logging -- direct open()+write(), no FileHandler (FileHandler calls
-# os.makedirs internally which is broken in FL's embedded Python).
+# File I/O -- empirically, FL's embedded Python 3.12.1 sub-interpreter
+# blocks `import _ctypes` AND returns NULL-without-exception for builtin
+# open(path, "w"/"a") AND for os.open(). The ONE write path that DID
+# work in earlier sessions: logging.FileHandler. Try multiple primitives
+# in order, fall through on failure, surface the situation via print().
 # ----------------------------------------------------------------------
+
+import logging as _logging  # noqa: E402
+
+_BRIDGE_LOGGER = None
+
+
+def _ensure_logger():
+    """Lazy-init a logging.FileHandler-backed logger. Idempotent.
+
+    Returns the logger or None if init fails. The socket-bridge version
+    used this approach and successfully wrote bridge.log -- if FL's
+    Python file IO is in a state where ANY write works, this is it.
+    """
+    global _BRIDGE_LOGGER
+    if _BRIDGE_LOGGER is not None:
+        return _BRIDGE_LOGGER
+    try:
+        lg = _logging.getLogger("mcp-bridge")
+        lg.setLevel(_logging.INFO)
+        lg.propagate = False
+        # Only add handler once -- check existing handlers for our file path.
+        already = False
+        for h in lg.handlers:
+            if isinstance(h, _logging.FileHandler) and getattr(h, "baseFilename", "") == str(LOG_PATH):
+                already = True
+                break
+        if not already:
+            handler = _logging.FileHandler(str(LOG_PATH), mode="a", encoding="utf-8", delay=True)
+            handler.setFormatter(
+                _logging.Formatter(
+                    "%(asctime)s %(levelname)s %(message)s",
+                    datefmt="%Y-%m-%d %H:%M:%S",
+                )
+            )
+            lg.addHandler(handler)
+        _BRIDGE_LOGGER = lg
+        return lg
+    except Exception as exc:
+        print("[mcp-bridge] logger init failed: %s" % exc)
+        return None
+
+
+def _write_bytes(path, data, append=False):
+    """Write data to path. Tries multiple primitives because FL's Python
+    has multiple broken IO paths. Returns True on first success.
+
+    Strategy:
+      1. builtin open() in "w"/"a" mode (often broken, but try anyway --
+         if the FileIO NULL bug isn't tripping for this path it works)
+      2. os.open() + os.write() (also often broken, try as fallback)
+      3. Path.write_bytes / Path.write_text via pathlib
+
+    On failure all the way through, return False; caller logs via print()
+    so the user sees the failure even if the log file is unwritable.
+    """
+    if isinstance(data, str):
+        data_str = data
+        data_bytes = data.encode("utf-8")
+    else:
+        data_bytes = data
+        data_str = None
+
+    mode = "a" if append else "w"
+    mode_b = "ab" if append else "wb"
+
+    # Attempt 1: builtin open() text mode
+    try:
+        with open(str(path), mode, encoding="utf-8") as fh:
+            fh.write(data_str if data_str is not None else data_bytes.decode("utf-8"))
+        return True
+    except Exception:
+        pass
+
+    # Attempt 2: builtin open() binary mode
+    try:
+        with open(str(path), mode_b) as fh:
+            fh.write(data_bytes)
+        return True
+    except Exception:
+        pass
+
+    # Attempt 3: os.open + os.write
+    try:
+        flags = os.O_WRONLY | os.O_CREAT
+        flags |= os.O_APPEND if append else os.O_TRUNC
+        fd = os.open(str(path), flags)
+        try:
+            os.write(fd, data_bytes)
+        finally:
+            os.close(fd)
+        return True
+    except Exception:
+        pass
+
+    # Attempt 4: pathlib
+    try:
+        if append:
+            existing = b""
+            try:
+                existing = Path(str(path)).read_bytes()
+            except Exception:
+                pass
+            Path(str(path)).write_bytes(existing + data_bytes)
+        else:
+            Path(str(path)).write_bytes(data_bytes)
+        return True
+    except Exception:
+        pass
+
+    return False
 
 
 def _log(level, msg):
-    """Append a single timestamped line to LOG_PATH. Best-effort."""
+    """Append a single timestamped line to LOG_PATH. Best-effort.
+
+    Tries logging.FileHandler first (empirically works in some FL Python
+    states), then falls back to direct _write_bytes attempts.
+    """
+    # WARN/ERROR always go to Script Output via print() -- guaranteed visible.
+    if level in ("WARN", "ERROR"):
+        print("[mcp-bridge] %s %s" % (level, msg))
+
+    lg = _ensure_logger()
+    if lg is not None:
+        try:
+            if level == "ERROR":
+                lg.error(msg)
+            elif level == "WARN":
+                lg.warning(msg)
+            else:
+                lg.info(msg)
+            return
+        except Exception:
+            pass
+
+    # Fallback to direct write
     line = "%s %s %s\n" % (
         time.strftime("%Y-%m-%d %H:%M:%S"),
         level,
         msg,
     )
-    # print() reaches FL's Script Output tab so the user sees errors
-    # even if the log file is unwritable.
-    if level in ("WARN", "ERROR"):
-        print("[mcp-bridge] %s %s" % (level, msg))
-    try:
-        with open(str(LOG_PATH), "a", encoding="utf-8") as fh:
-            fh.write(line)
-    except Exception:
-        # Best-effort -- a logging failure must never break the dispatch loop.
-        pass
+    _write_bytes(LOG_PATH, line, append=True)
 
 
 # ----------------------------------------------------------------------
@@ -176,11 +302,8 @@ def OnInit():
 
     # Write a heartbeat file so Node-side `wait_for_bridge` can detect us
     # before the first real request. Content is just the start timestamp.
-    try:
-        with open(str(HEARTBEAT_PATH), "w", encoding="utf-8") as fh:
-            fh.write(str(int(time.time() * 1000)))
-    except Exception as exc:
-        _log("WARN", "OnInit: could not write heartbeat: %s" % exc)
+    if not _write_bytes(HEARTBEAT_PATH, str(int(time.time() * 1000)), append=False):
+        _log("WARN", "OnInit: heartbeat write failed (raw os.write also failed)")
 
     msg = "MCP file-IPC bridge ready at %s" % IPC_DIR
     _log("INFO", msg)
@@ -258,13 +381,10 @@ def OnIdle():
         # matching id; if the write fails we log and move on (the caller
         # will time out, which is the correct surface).
         resp_path = IPC_DIR / ("resp_%s.json" % _id_for_filename(req_id))
-        try:
-            with open(str(resp_path), "w", encoding="utf-8") as fh:
-                fh.write(response_bytes.decode("utf-8"))
-        except Exception as exc:
+        if not _write_bytes(resp_path, response_bytes, append=False):
             _log(
                 "ERROR",
-                "OnIdle: could not write %s: %s" % (resp_path.name, exc),
+                "OnIdle: could not write %s (raw os.write failed)" % resp_path.name,
             )
 
         processed += 1
