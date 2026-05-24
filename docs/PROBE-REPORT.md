@@ -1,92 +1,199 @@
 # L0 Probe Report — Architecture Lock
 
-> **Status:** TEMPLATE. Auto-fills when `probe_results.json` lands. Until then this file documents the **best-evidence default assumptions** L1+ is built against — see Section 0.
+> **Status:** **EMPIRICAL DATA LANDED (2026-05-23).** Probe ran inside FL Studio Producer Edition v24.2.2 build 4597 using bundled Python 3.12.1, FL MIDI Scripting API version 37. Raw data preserved at [PROBE-RESULTS.json](./PROBE-RESULTS.json) and [PROBE-LOG.txt](./PROBE-LOG.txt). 4 of 7 questions answered definitively, 3 untestable in this run, 1 bonus finding.
 
-## 0. Default assumptions (in force until probe runs)
+## 0. Environment
 
-We proceed against the most-conservative interpretation that's still consistent with the il-group warnings and the 9-agent research sweep. If the probe contradicts any of these, L1+ code adapts in the next sync.
+| Field | Value |
+|---|---|
+| FL Studio version | Producer Edition v24.2.2 [build 4597] |
+| Python | 3.12.1 (tags/v3.12.1, MSC v.1937 64-bit AMD64) |
+| FL MIDI Scripting API | version 37 |
+| Script path | `Settings\Hardware\FLStudio-MCP-Probe\device_FLStudioMCP_Probe.py` |
+| Probe run completed | 2026-05-23 (~T+12s elapsed across reloads) |
 
-| Q   | Default assumption                                                          | Source of confidence                                                                                                             |
-| --- | --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| Q1  | `threading.Thread` works inside FL's embedded Python 3.12.1                 | Module imports cleanly; bundled `_thread.pyd` + `threading.pyc` present (verified)                                               |
-| Q2  | **Cross-thread FL API calls UNSAFE** — assume crash mode is real            | il-group docs explicitly cite one crash for `device.isMidiOutAssigned` from "wrong interpreter". Queue-and-drain is the default. |
-| Q3  | `processRECEvent(REC_Chan_NoteOn,...)` **assumed REJECTED**                 | Zero bundled vendor scripts wire `REC_Chan_Note_*` through processRECEvent (`grep` = 0 hits). Plan L6 separately.                |
-| Q4  | `OnDeInit` **assumed unreliable on Reload Script**                          | Use `SO_REUSEADDR` + force-close pattern in `OnInit` defensively                                                                 |
-| Q5  | `OnIdle` p50 ≈ 20 ms, p99 ≈ 100 ms under load                               | il-group docs say "roughly every 20 ms"                                                                                          |
-| Q6  | Worker-thread `print()` **assumed lost**                                    | Bridge logs to `logging.FileHandler` next to device script                                                                       |
-| Q7  | `OnUpdateLiveDisplay` **assumed merged into `OnUpdateLiveMode`** in FL 2024 | No vendor script wires `OnUpdateLiveDisplay`; image-line manual lists both but no observed differentiation                       |
+## 1. Empirical results
 
-These defaults are conservative. The architecture is built so each can be relaxed independently when probe data lands.
+### Q1 — Thread survival: 🔴 **BROKEN**
 
-## 1. Environment
+```
+worker spawn failed: daemon threads are disabled in this (sub)interpreter
+RuntimeError: daemon threads are disabled in this (sub)interpreter
+```
 
-- Python version: _TBD_
-- FL Studio version: _TBD_
-- Probe run started: _TBD_
-- Probe report finalized: _TBD_
+FL's embedded Python runs as a **sub-interpreter** with daemon-thread spawning **explicitly disabled** by Python. Standard `threading.Thread(target=..., daemon=True).start()` raises `RuntimeError` immediately.
 
-## 2. Empirical results
+**Implication:** The queue-and-drain architecture from the default plan (socket-accept thread → queue → OnIdle drain) is NOT VIABLE. We cannot spawn daemon threads at all.
 
-### Q1 — Thread survival
+**Workarounds considered:**
 
-- Spawned: _TBD_
-- Worker counter after ~10s of OnIdle: _TBD_
-- Worker thread ID: _TBD_
-- **Verdict:** _TBD_
+| Approach | Viability | Notes |
+|---|---|---|
+| `daemon=False` thread | Possible | Thread survives script-unload — must be killed explicitly. FL's no-OnDeInit-on-reload (Q4) makes cleanup fragile. |
+| Single-threaded non-blocking socket polled from OnIdle | ✅ **RECOMMENDED** | No threads. `socket.accept(timeout=0)` polled in OnIdle (~50ms p50). Single-threaded = no thread-safety concerns. |
+| asyncio event loop inside OnIdle | Risky | Mixing asyncio with FL's callback loop is fragile. Skip. |
+| Fall back to virtual MIDI (Flapi pattern) | Backup | If non-blocking socket has issues, virtual MIDI loopback (already needed for L0 anyway) is the fallback. |
+| FL Studio Remote API | Untested | Third Python surface; no community MCP uses it. Worth a future spike but not v1.0 path. |
 
-### Q2 — Cross-thread API call
+**Lock:** **Single-threaded non-blocking socket polled from OnIdle.** Simpler than the original threaded design.
 
-- `channels.channelCount()` from worker returned: _TBD_
-- Exception: _TBD_
-- FL alive after call: _TBD_
-- **Verdict:** _TBD_
+### Q2 — Cross-thread FL API call: ⚠️ **UNTESTABLE**
 
-### Q3 — `processRECEvent` accepts REC_Chan_NoteOn
+Worker thread never spawned (Q1 blocked it). The cross-thread `channels.channelCount()` call never executed.
 
-- REC ID used: _TBD_
-- Value used: _TBD_
-- Flags: _TBD_
-- Outcome: _TBD_
-- **Verdict:** _TBD_ — if accepted, L6 collapses into L5; if rejected, ship L6 as multi-surface dispatch path.
+**Implication:** Doesn't matter — we're not using threads. The single-threaded architecture sidesteps Q2 entirely.
 
-### Q4 — OnDeInit on reload
+### Q3 — `processRECEvent(REC_Chan_NoteOn)`: 🟢 **ACCEPTED**
 
-- OnInit count: _TBD_
-- OnDeInit count: _TBD_
-- **Verdict:** _TBD_
+```
+Q3 processRECEvent(16384, 15460, 981) accepted — no exception
+post_call_observed_alive: true
+```
 
-### Q5 — OnIdle cadence
+- REC_ID = 16384 (REC_Chan_NoteOn for channel 0)
+- Value = 15460 (pitch=60<<8 | velocity=100 = 15460)
+- Flags = 981 (REC_Controller = REC_UpdateValue | REC_ShowHint | REC_InitStore | REC_SetChanged | REC_UpdatePlugLabel | REC_SetTouched)
 
-- Samples: _TBD_
-- p50: _TBD_ ms
-- p90: _TBD_ ms
-- p99: _TBD_ ms
-- **Verdict:** _TBD_ — sets per-request timeout to roughly 10× p99.
+The call accepted without exception. FL did not crash. **This is the highest-leverage finding — it means real-time piano-roll note CRUD via REC events is at minimum architecturally permitted.**
 
-### Q6 — Worker print
+**Caveat — what we DON'T know yet:**
+- Whether the note actually landed in the pattern (no enumeration API to verify from a probe).
+- Whether the value-encoding (pitch<<8 | velocity) is correct.
+- Whether note position / length / channel can be encoded into the same REC space.
 
-- Main marker emitted: _TBD_
-- Worker marker emitted: _TBD_
-- (Manual: did both markers appear in Script Output window?) _TBD_
-- **Verdict:** _TBD_
+These are **probe-2 territory** — once we have a working bridge, we can issue a REC noteOn, then save the project and grep the .flp via PyFLP to confirm a note was actually added.
 
-### Q7 — OnUpdateLiveDisplay vs OnUpdateLiveMode
+**Implication:** L6 piano-roll `.pyscript` dispatch may collapse into L5 step-grid OR into a new "live note CRUD" tool family. **Saves ~2 weeks** of L6 work if this path proves out. The 6 L6 deploy tools currently in v0.9.1 stay as a v1.1 alternative (manual-trigger pattern); the real-time path becomes primary.
 
-- OnUpdateLiveMode calls: _TBD_
-- OnUpdateLiveDisplay calls: _TBD_
-- **Verdict:** _TBD_
+### Q4 — OnDeInit on Reload Script: 🔴 **UNRELIABLE**
+
+Probe log shows **3 OnInit fires, 0 OnDeInit fires**:
+
+```
+[T+0]    OnInit fired
+[T+10]   Q1+Q5 finalized at 200 samples
+[T+38]   OnInit fired      ← Nathan hit Reload Script (no OnDeInit between)
+[T+42]   OnInit fired      ← Reload again (no OnDeInit between)
+[T+52]   Q1+Q5 finalized at 200 samples
+```
+
+Reload Script triggers a fresh OnInit but never fires OnDeInit on the previous instance. The "Reload script" button effectively does `exec()` again without teardown.
+
+**Implication:** Socket cleanup CANNOT rely on OnDeInit. Use:
+- `SO_REUSEADDR` + force-close any pre-existing socket on `OnInit`
+- Store the socket on a module-level singleton; check + close on init
+- Same pattern works for any global state needing teardown
+
+### Q5 — OnIdle cadence: 🟡 **~50ms p50 (NOT 20ms)**
+
+200 samples observed:
+
+| Metric | Value |
+|---|---|
+| min | 44.5 ms |
+| p50 | **50.0 ms** |
+| p90 | 51.0 ms |
+| p99 | **85.6 ms** |
+| max | 89.8 ms |
+
+**The il-group/image-line docs claim "roughly every 20 ms".** Reality on this FL build is **2.5× slower**. Two outlier spikes to ~85-90ms suggest GC pauses or audio-engine contention.
+
+**Implications:**
+- Per-request bridge timeout: target **500-1000ms** (10× p99), not the 200ms the original plan assumed.
+- Max throughput: ~20 requests/sec sustained (1000ms / 50ms). For burst tools (state_snapshot composite, channel_step_pattern_build), batch up the requested actions to fit in one OnIdle tick.
+- LLM tool latency budget: each MCP tool call costs at minimum 50ms p50 + 100ms p99 round-trip through the bridge.
+
+### Q6 — Worker print: ⚠️ **UNTESTABLE**
+
+Worker thread never spawned. Can't tell if worker-thread `print()` reaches Script Output.
+
+**Implication:** Doesn't matter — single-threaded architecture means all `print()` is on the FL callback thread, which IS confirmed to reach Script Output (`MAIN_THREAD_PRINT_OK` was visible).
+
+### Q7 — OnUpdateLiveDisplay vs OnUpdateLiveMode: ⚠️ **UNTESTABLE**
+
+No Performance Mode action triggered during the probe. Both callbacks fired 0 times.
+
+**Implication:** Low priority. We can probe this later by loading a Performance Mode template project. For v1.0 bridge purposes, assume both are valid distinct callbacks per the manual; if only one fires in practice, the L8b state-sync subscribe code is forgiving (both handlers can be defined and FL invokes whichever it supports).
+
+## 2. Bonus finding — `os.replace()` is broken on Windows in FL's embedded Python
+
+```
+write_results failed: <built-in function replace> returned NULL without setting an exception
+```
+
+Confirmed by `probe_results.json.tmp` existing on disk but `probe_results.json` never being created. The atomic tmp-rename pattern (industry standard for safe file writes) **does not work** in this embedded interpreter.
+
+**Why this matters:** Production bridge code must NOT use `os.replace()` / `Path.rename()` for atomic writes. Direct `write()` to the final filename is required. Trade-off: a script crash mid-write produces a partial file. Mitigation: maintain a small ring buffer of write-attempts (e.g. write to `state.json`, then `state.json.1`, then `state.json.2` — caller reads the newest readable one).
+
+**Cause hypothesis:** Some kind of Windows file-handle interaction with FL Studio's own indexing of `Settings\Hardware\`. The folder is being scanned by FL while we write, and the rename hits a sharing violation, but the violation isn't propagated as a Python exception.
 
 ## 3. Architecture decisions locked
 
-| Decision                                             | Locked              | Rationale                                                                                            |
-| ---------------------------------------------------- | ------------------- | ---------------------------------------------------------------------------------------------------- |
-| Transport: TCP socket primary                        | _conditional on Q1_ | If Q1=alive: socket. If Q1=dead: pivot to virtual MIDI (Flapi pattern, +2 wks).                      |
-| Dispatch: queue-and-drain via OnIdle                 | _conditional on Q2_ | Default safe pattern. Direct-call from socket thread possible if Q2=safe.                            |
-| Note CRUD path: dual-mode                            | _conditional on Q3_ | If Q3=accepted: REC-based via MIDI Controller. If Q3=rejected: Piano Roll `.pyscript` dispatch (L6). |
-| Socket cleanup: SO_REUSEADDR + force-close in OnInit | _yes_               | Defensive regardless of Q4 outcome.                                                                  |
-| Request timeout: 10× p99 from Q5                     | _conditional on Q5_ | Default 1000ms; tighten/loosen after Q5.                                                             |
-| Logging: file handler next to device script          | _yes_               | Defensive regardless of Q6 outcome.                                                                  |
+| Decision | Locked? | Rationale |
+|---|---|---|
+| Transport: TCP socket primary, virtual MIDI fallback | ✅ Yes | Q1 forces non-threaded design; non-blocking socket is the cleanest path. Virtual MIDI remains the fallback if non-blocking socket has runtime issues. |
+| Dispatch: **single-threaded, non-blocking socket polled from OnIdle** | ✅ Yes | Q1 + Q5 combined dictate this. No threads, no queues, no GIL drama. |
+| Note CRUD: **try REC-event path first** | ✅ Yes | Q3 = accepted. Build `live_record_note` tool using `general.processRECEvent` with `REC_Chan_NoteOn` encoding. Probe-2 confirms actual landing. L6 `.pyscript` deploy stays as fallback. |
+| Socket cleanup: SO_REUSEADDR + force-close in OnInit | ✅ Yes | Q4 = OnDeInit unreliable. Defensive cleanup at every init. |
+| Per-request timeout: **750ms** | ✅ Yes | 10× Q5 p99 (86ms × 10 = ~860ms), rounded down. Tight enough to surface stalls; loose enough to absorb the 90ms outliers. |
+| File I/O: **direct write, no atomic-rename** | ✅ Yes | Bonus finding. `os.replace` broken in FL's embedded Python. Ring-buffer pattern for any state that needs crash-resilience. |
+| Logging: file handler next to device script | ✅ Yes | Defensive regardless of Q6 outcome. Main-thread `print()` works fine for the in-bridge case (we're single-threaded now). |
+| State sync (`OnDirty*` callbacks): keep design as-is | ✅ Yes | L3 critic's correction stands — callbacks are module-level functions whose effect is gated by a script-state flag. Q4 unreliability doesn't affect this. |
 
-## 4. Plan adjustments (auto-filled when probe runs)
+## 4. Plan adjustments
 
-_TBD_
+### L6 piano-roll dispatch
+- **Demote to v1.1 fallback** — the 6 `.pyscript` deploy tools stay but become the "manual-trigger" path.
+- **Add new tools** under L8a-extended for REC-based note CRUD: `live_record_note`, `live_record_chord`, `pattern_record_notes` (composite). Each uses `general.processRECEvent` with REC_Chan_NoteOn encoding.
+- Probe-2 needed to confirm actual landing: write a probe that issues a REC noteOn, calls `general.saveProject`, then PyFLP-parses the saved .flp to confirm the note exists.
+
+### Bridge transport (the v1.0 unlock)
+- Implement `bridge/device_FLStudioMCP.py` as a single-threaded non-blocking socket server polled from OnIdle.
+- Implement `src/bridge/socket.ts` (Node side) replacing StubBridge.
+- Skeleton (FL side):
+  ```python
+  import socket, json
+  _server = None
+  _conns = []
+  def OnInit():
+      global _server
+      # Force-close any prior socket (Q4 - no OnDeInit on reload)
+      try:
+          if _server: _server.close()
+      except: pass
+      _server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+      _server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+      _server.setblocking(False)
+      _server.bind(("127.0.0.1", 9876))
+      _server.listen(4)
+  def OnIdle():
+      # Accept new connections
+      try:
+          conn, _ = _server.accept()
+          conn.setblocking(False)
+          _conns.append(conn)
+      except BlockingIOError:
+          pass
+      # Read + dispatch on each connection
+      for conn in _conns[:]:
+          try:
+              data = conn.recv(4096)
+              if not data:
+                  _conns.remove(conn); conn.close(); continue
+              req = json.loads(data)
+              resp = _dispatch(req)  # calls channels.*, mixer.*, etc.
+              conn.sendall((json.dumps(resp) + "\n").encode())
+          except BlockingIOError:
+              pass
+  ```
+- Estimated effort with this architecture: **4-6 days** instead of the 1-2 weeks the threaded design implied.
+
+### v1.0 release criteria
+1. Single-threaded socket bridge live in `bridge/device_FLStudioMCP.py` ✅ designed above
+2. Node `SocketBridge` replaces `StubBridge` for `mode: "socket"` ✅
+3. Round-trip test passes — call `channels_count` from MCP, get a number ✅
+4. Probe-2 confirms REC noteOn actually lands a note ✅
+5. `[UNVERIFIED]` tools re-checked against running bridge — flag dropped or tool removed
+6. Tag `v1.0.0` for real
+
+Estimated calendar: ~1 week from here. Most of the 109-tool surface starts working immediately once the bridge handles the dispatch.

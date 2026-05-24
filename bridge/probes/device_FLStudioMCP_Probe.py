@@ -49,8 +49,22 @@ import transport
 import ui
 import midi
 
-RESULTS_PATH = Path(__file__).parent / "probe_results.json"
-LOG_PATH = Path(__file__).parent / "probe_log.txt"
+# FL Studio's MIDI scripting environment does NOT define __file__ — device
+# scripts are exec'd by the host rather than imported as a module. Derive
+# the install path from the user's profile dir instead. This works for any
+# user whose FL data lives at the documented default location.
+_USER_HOME = os.path.expanduser("~")
+SCRIPT_DIR = (
+    Path(_USER_HOME)
+    / "Documents"
+    / "Image-Line"
+    / "FL Studio"
+    / "Settings"
+    / "Hardware"
+    / "FLStudio-MCP-Probe"
+)
+RESULTS_PATH = SCRIPT_DIR / "probe_results.json"
+LOG_PATH = SCRIPT_DIR / "probe_log.txt"
 
 # Lock + state accessed from FL callback thread AND worker thread.
 _lock = threading.Lock()
@@ -62,7 +76,7 @@ state = {
         "python_version": None,
         "fl_version": None,
         "fl_prog_title": None,
-        "script_path": str(Path(__file__)),
+        "script_path": str(SCRIPT_DIR / "device_FLStudioMCP_Probe.py"),
     },
     "q1_thread_survival": {
         "spawned": False,

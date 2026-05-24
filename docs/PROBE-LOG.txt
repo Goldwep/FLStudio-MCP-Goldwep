@@ -1,0 +1,19 @@
+[1779609170.048] OnInit fired
+[1779609170.050] worker spawn failed: daemon threads are disabled in this (sub)interpreter
+[1779609170.050] Q3 processRECEvent(16384, 15460, 981) accepted — no exception
+[1779609170.051] write_results failed: <built-in function replace> returned NULL without setting an exception
+[1779609170.053] write_results failed: error return without exception set
+[1779609180.035] write_results failed: error return without exception set
+[1779609180.035] Q1+Q5 finalized at 200 samples; counter=0
+[1779609208.854] OnInit fired
+[1779609208.855] worker spawn failed: daemon threads are disabled in this (sub)interpreter
+[1779609208.857] Q3 processRECEvent(16384, 15460, 981) accepted — no exception
+[1779609208.858] write_results failed: <built-in function replace> returned NULL without setting an exception
+[1779609208.858] write_results failed: error return without exception set
+[1779609212.515] OnInit fired
+[1779609212.516] worker spawn failed: daemon threads are disabled in this (sub)interpreter
+[1779609212.516] Q3 processRECEvent(16384, 15460, 981) accepted — no exception
+[1779609212.517] write_results failed: <built-in function replace> returned NULL without setting an exception
+[1779609212.518] write_results failed: error return without exception set
+[1779609222.554] write_results failed: error return without exception set
+[1779609222.554] Q1+Q5 finalized at 200 samples; counter=0
