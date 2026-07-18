@@ -4,28 +4,44 @@ L7 tools (`flp_scan_folder`, `flp_inspect`, `flp_get_plugins`, `flp_get_samples`
 
 This is a **one-time install**.
 
-## Install
+## Python version constraint (IMPORTANT)
 
-```powershell
-# System Python 3.13 (recommended — what the MCP server defaults to):
-"C:\Users\Nathan\AppData\Local\Programs\Python\Python313\python.exe" -m pip install --user pyflp
+**PyFLP 2.2.x requires Python ≤ 3.10.** Its abstract `EventEnum(value)` lookup relies on `_missing_` dispatch against an empty enum, which Python 3.11+ rejects with:
+
+```
+TypeError: <enum 'EventEnum'> has no members defined
 ```
 
-PyFLP 2.2.1 pulls in `construct`, `sortedcontainers`, and `typing-extensions` — all pure-Python, no compiler needed.
+(Verified 2026-07-18 on 3.11 and 3.13 — every parse fails; on 3.10 everything works. PyFLP is unmaintained, so don't expect an upstream fix.)
+
+## Install (recommended: repo-local uv venv)
+
+```powershell
+cd <repo root>
+uv venv --python 3.10 .venv-pyflp
+uv pip install --python .venv-pyflp pyflp
+```
+
+The TS runner **auto-detects `.venv-pyflp/`** at the repo root — no configuration needed. `.venv-pyflp` is gitignored.
 
 ## Verify
 
 ```powershell
-"C:\Users\Nathan\AppData\Local\Programs\Python\Python313\python.exe" -c "import pyflp; print(pyflp.__version__)"
+.venv-pyflp\Scripts\python.exe -c "import pyflp; print('ok')"
+# Full end-to-end check against a demo project:
+.venv-pyflp\Scripts\python.exe bridge\pyflp_helper.py inspect "{\"path\": \"C:\\Program Files\\Image-Line\\FL Studio 2024\\Data\\Demo projects\\Demo songs\\Asher Postman - Future Bass.flp\"}"
 ```
 
-Expected: `2.2.1`.
+Expected: a JSON envelope with `"ok": true` and the project title/tempo.
 
 ## Configure (optional)
 
-The TS runner defaults to `C:\Users\Nathan\AppData\Local\Programs\Python\Python313\python.exe`. Override with environment variables:
+Interpreter resolution order:
 
-- `FLSTUDIO_MCP_PYTHON` — full path to the Python interpreter that has PyFLP installed.
+1. `FLSTUDIO_MCP_PYTHON` — full path to a Python (≤ 3.10) that has PyFLP installed.
+2. Repo-local `.venv-pyflp` (see above) — auto-detected.
+3. PATH-resolved `python` (Windows) / `python3` (elsewhere) — only works if your system Python is ≤ 3.10.
+
 - `FLSTUDIO_MCP_PYFLP_HELPER` — full path to `bridge/pyflp_helper.py` (only needed if you've moved the helper).
 
 ## Behavior notes
@@ -35,3 +51,4 @@ The TS runner defaults to `C:\Users\Nathan\AppData\Local\Programs\Python\Python3
 - **PyFLP missing.** If `pyflp` isn't importable, the helper returns a JSON error with a `hint` field instructing you to run the install command above. Surfaces as `BridgeError code "PYFLP_ACTION_FAILED"` on the TS side.
 - **FL not running.** L7 doesn't talk to FL Studio at all — these tools work even if FL is closed.
 - **`flp_get_pattern_summary` is YELLOW.** FL 2025 changed playlist/pattern serialization in ways PyFLP doesn't fully decode yet; `note_count` may be 0 or inaccurate on modern projects.
+- **Plugin names may be generic.** On some projects PyFLP reports `_PluginBase` instead of the concrete plugin name (seen on FL 20.5-era projects); counts and slot positions are still correct.

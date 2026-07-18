@@ -1,28 +1,22 @@
 # FL Studio MCP — Goldwep
 
-MCP server for FL Studio (Image-Line). Full-spectrum control surface — composition _and_ project inspection — for LLM workflows. Built on a localhost bridge into FL Studio's bundled Python 3.12 MIDI scripting environment, with `.pyscript` deploy + PyFLP project intelligence as auxiliary surfaces.
+MCP server for FL Studio (Image-Line). Full-spectrum control surface — composition _and_ project inspection — for LLM workflows. Built on a **file-IPC bridge** into FL Studio's bundled Python 3.12 MIDI scripting environment, with `.pyscript` deploy + PyFLP project intelligence as auxiliary surfaces.
 
-**110 tools registered across 9 milestones. Bridge transport implemented and unit-tested.**
+**110 tools registered across 9 milestones. Bridge live-verified against FL Studio 2024 v24.2.2.**
 
-> **Status (2026-05-24): v1.0.0-rc1.** Bridge transport is implemented (single-threaded non-blocking socket polled from FL's `OnIdle` — architecture locked by [`docs/PROBE-REPORT.md`](./docs/PROBE-REPORT.md)). Two halves shipped:
+> **Status: v1.0.1 (live-verified 2026-05-24).** `npm run verify:live` against actual FL Studio: **39 ok / 0 fail / 0 timeout / 49 skip** (skips = write-side ops, gated behind `--include-writes`). Two halves shipped:
 >
-> - `bridge/device_FLStudioMCP.py` (FL-side, 970 lines, 88-entry dispatch table covering every `bridge.call` method in `src/tools/`)
-> - `src/bridge/socket.ts` (Node-side, 258 lines, `SocketBridge implements Bridge` with lazy connect, per-request id matching, 750ms timeout, reconnect logic)
+> - `bridge/device_FLStudioMCP.py` (FL-side, 88-entry dispatch table covering every `bridge.call` method in `src/tools/`, pumped from `OnIdle`)
+> - `src/bridge/file_ipc.ts` (Node-side, `FileBridge implements Bridge` with per-request id matching, heartbeat-based liveness fail-fast, 1500ms timeout)
 >
-> **End-to-end mock test passes** (`tests/bridge_device_smoke.py`): 13 scenarios — read/write/composite/bridge-internal/translation/error all round-trip cleanly. Plus 5 SocketBridge unit tests covering connect-failure / ok-response / error-response / timeout / out-of-order id routing.
+> Transport is **file IPC** (JSON request/response files in FL's settings folder), not sockets: FL 2024's embedded Python 3.12.1 sub-interpreter cannot create sockets, and its `_io.FileIO` requires **bytes paths in binary mode** (str paths hit a NULL-without-exception bug). File deletion is impossible from FL's side, so processed requests are truncated to 0-byte tombstones and the Node side unlinks them. Empirical data: [`docs/PROBE-REPORT.md`](./docs/PROBE-REPORT.md).
 >
-> **What's still pending for v1.0.0 final** (cuts when one of these lands):
->
-> - **Probe-2** — confirm `processRECEvent(REC_Chan_NoteOn, ...)` actually adds a note to the pattern. L0 confirmed the call is accepted; landing is the open question. Non-destructive probe at `bridge/probes/device_FLStudioMCP_Probe2.py` is deployed and ready — user assigns it as a controller in FL MIDI settings, reads result. If yes → L6 piano-roll dispatch collapses into REC-based live composition.
-> - **Live FL integration test** — assign `FLStudio MCP Bridge` as a controller in FL Studio MIDI Settings (see [`docs/INSTALL.md`](./docs/INSTALL.md)), then verify `channels_count` round-trip from Claude → MCP → bridge → FL → response.
-> - **`[UNVERIFIED]` tool re-check** — 10 tools whose underlying FL API has zero vendor-script precedent (`mixer.setCurrentTempo`, `setRouteToLevel`, `setEqGain`, `setEqFrequency`, `setEqFreq`, `linkChannelToTrack`, `getRecPPB`, `currentTime`, `getSongLength`, `getFocusedFormID`). Each gets a one-call probe against the live bridge; flags either dropped or tools renamed.
->
-> **Audit history retained:** 5-reviewer audit cycle (L1 friendly → L5 pathological, 77 raw findings) at [`docs/AUDIT-CYCLE.md`](./docs/AUDIT-CYCLE.md); vendor-script audit of every `bridge.call` (62 vendor-confirmed, 10 docs-only, 8 invented/rescued) at `_scratch/flstudio-mcp-research/bridge-contract-audit.md`. Earlier honest-relabel: `v1.0.0` tag (commit `0b65df8`) → `v0.9.1-pre-bridge` (`6a8f0dd`) → `v1.0.0-rc1` (current).
+> **Audit history retained:** 5-reviewer audit cycle (L1 friendly → L5 pathological, 77 raw findings) at [`docs/AUDIT-CYCLE.md`](./docs/AUDIT-CYCLE.md); vendor-script audit of every `bridge.call` at `_scratch/flstudio-mcp-research/bridge-contract-audit.md`. Version history: `v0.9.1-pre-bridge` → `v1.0.0-rc1..rc3` → `v1.0.1` (first live-verified release; the `v1.0.0` tag predates the bridge and is superseded).
 
 ## Architecture
 
 ```
-┌──────────────┐  stdio   ┌──────────────────┐   socket / MIDI   ┌─────────────────────────┐
+┌──────────────┐  stdio   ┌──────────────────┐    file IPC       ┌─────────────────────────┐
 │ Claude /     │ ───────▶ │ flstudio-mcp     │ ──────────────▶   │ device_FLStudioMCP.py   │
 │ MCP client   │ ◀─────── │ (Node, this repo)│ ◀──────────────   │ (runs inside FL Studio) │
 └──────────────┘          └──────┬───────────┘                   └────────────┬────────────┘
@@ -31,7 +25,7 @@ MCP server for FL Studio (Image-Line). Full-spectrum control surface — composi
                                  ▼                            transport / playlist / plugins /
                           ┌──────────────┐                    arrangement / ui / general
                           │ pyflp_helper │ ──▶ reads .flp files (offline analysis)
-                          │ (Python 3.13)│
+                          │ (Python≤3.10)│
                           └──────────────┘
                                  │
                                  ▼

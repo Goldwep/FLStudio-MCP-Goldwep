@@ -12,10 +12,10 @@
 // over each other's IPC traffic.
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, readdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FileBridge } from "../src/bridge/file_ipc.js";
+import { FileBridge, isBridgeAlive } from "../src/bridge/file_ipc.js";
 import { BridgeError } from "../src/bridge/types.js";
 
 // ---------------------------------------------------------------------------
@@ -36,6 +36,10 @@ interface FakeFL {
 }
 
 function startFakeFL(dir: string, handle: ReqHandler, intervalMs = 5): FakeFL {
+  // Real FL writes a heartbeat from OnInit + refreshes it from OnIdle;
+  // FileBridge.call() fails fast with BRIDGE_NOT_READY without a fresh
+  // one, so the fake FL must provide it too.
+  writeFileSync(join(dir, "bridge_alive.txt"), String(Date.now()), "utf8");
   const timer = setInterval(() => {
     let entries: string[];
     try {
@@ -203,6 +207,28 @@ describe("FileBridge: round-trip against fake-FL poller", () => {
     const [a, b] = await Promise.all([bridge.call("a"), bridge.call("b")]);
     expect(a).toBe("A");
     expect(b).toBe("B");
+  });
+
+  it("isBridgeAlive: fresh non-empty heartbeat is alive; stale or empty is dead", async () => {
+    const hb = join(dir, "bridge_alive.txt");
+
+    // No heartbeat file at all -> dead.
+    expect(await isBridgeAlive(dir)).toBe(false);
+
+    // Fresh, non-empty heartbeat -> alive.
+    writeFileSync(hb, String(Date.now()), "utf8");
+    expect(await isBridgeAlive(dir)).toBe(true);
+
+    // 0-byte heartbeat (OnDeInit tombstone) -> dead, even though fresh.
+    writeFileSync(hb, "", "utf8");
+    expect(await isBridgeAlive(dir)).toBe(false);
+
+    // Non-empty but stale mtime (FL closed; file can't be deleted from
+    // FL's side) -> dead.
+    writeFileSync(hb, String(Date.now()), "utf8");
+    const staleSec = (Date.now() - 60_000) / 1000;
+    utimesSync(hb, staleSec, staleSec);
+    expect(await isBridgeAlive(dir)).toBe(false);
   });
 
   it("survives a transient empty/partial response file", async () => {

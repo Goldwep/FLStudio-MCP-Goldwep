@@ -17,15 +17,28 @@ import { fileURLToPath } from "node:url";
 import { BridgeError } from "../bridge/index.js";
 import { logger } from "../utils/logger.js";
 
-// We do NOT hardcode a per-developer Python path. The PATH-resolved "python"
-// covers any user with a properly-installed CPython 3.10+. Users who need
-// a specific interpreter (FL's bundled Python, a venv, etc.) set
-// FLSTUDIO_MCP_PYTHON. On Windows where "python" sometimes resolves to the
-// Microsoft Store stub, "py" is a documented fallback shipped by the
-// official installer — we try it if "python" isn't usable. (The runner
-// doesn't probe PATH at module-load time — the OS does the probe on every
-// spawn, so a transient PATH change is honored.)
+// Python interpreter resolution, in priority order:
+//   1. FLSTUDIO_MCP_PYTHON env var (explicit user override)
+//   2. A repo-local `.venv-pyflp` virtualenv, if present. PyFLP 2.2.x
+//      requires Python <= 3.10: its abstract EventEnum(value) lookup
+//      relies on `_missing_` dispatch that Python 3.11+ rejects with
+//      "TypeError: <enum 'EventEnum'> has no members defined". The
+//      documented setup (docs/L7-PYFLP-SETUP.md) provisions this venv
+//      via `uv venv --python 3.10 .venv-pyflp`.
+//   3. PATH-resolved "python" (or "python3" off-Windows) — works only
+//      if the system Python is <= 3.10.
 const DEFAULT_PYTHON = process.platform === "win32" ? "python" : "python3";
+
+function venvPython(): string | null {
+  const here = dirname(fileURLToPath(import.meta.url));
+  // src/pyflp → ../../.venv-pyflp ; dist/pyflp → same relative hop.
+  const venvDir = resolve(here, "..", "..", ".venv-pyflp");
+  const candidate =
+    process.platform === "win32"
+      ? resolve(venvDir, "Scripts", "python.exe")
+      : resolve(venvDir, "bin", "python");
+  return existsSync(candidate) ? candidate : null;
+}
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -41,6 +54,8 @@ function defaultHelperPath(): string {
 function pythonExecutable(): string {
   const envPath = process.env.FLSTUDIO_MCP_PYTHON;
   if (envPath && envPath.trim().length > 0) return envPath;
+  const venv = venvPython();
+  if (venv) return venv;
   return DEFAULT_PYTHON;
 }
 

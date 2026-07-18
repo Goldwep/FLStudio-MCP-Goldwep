@@ -39,7 +39,7 @@
 //     a 0-byte file. Mitigation: a JSON.parse failure on an empty/
 //     incomplete file is treated as "not ready yet" -- we keep polling.
 
-import { readdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
+import { readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -105,6 +105,20 @@ export class FileBridge implements Bridge {
           `ensure the ipc/ subfolder exists (the installer creates it), and ` +
           `reload the device script.`,
         { code: "BRIDGE_CONNECT_FAILED" },
+      );
+    }
+
+    // Fail fast when the heartbeat says FL is dead. The bridge rewrites
+    // bridge_alive.txt every ~5s from OnIdle; a missing/empty/stale
+    // heartbeat means no OnIdle pump is running, so a request would just
+    // sit unprocessed until the timeout. Failing here converts a
+    // guaranteed 1500ms "timed out" into an instant, accurate error.
+    if (!(await isBridgeAlive(this.ipcDir))) {
+      throw new BridgeError(
+        `FL Studio bridge is not running (heartbeat missing or stale in ${this.ipcDir}). ` +
+          `Start FL Studio, ensure the "FLStudio MCP Bridge" controller is enabled in ` +
+          `MIDI Settings, and check FL's Script Output for "[mcp-bridge] ... ready".`,
+        { code: "BRIDGE_NOT_READY" },
       );
     }
 
@@ -211,14 +225,23 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Re-export the directory listing of the IPC folder for diagnostic use
-// (e.g. verify-live's wait-for-bridge loop). Returns true if the folder
-// is reachable AND FL has written a heartbeat file (bridge_alive.txt).
+// Heartbeat freshness window. The FL bridge rewrites bridge_alive.txt
+// every ~5s from OnIdle. FL's Python cannot delete files, so the file
+// SURVIVES FL closing — existence alone is meaningless. A live bridge is
+// one whose heartbeat is non-empty and recently modified.
+const HEARTBEAT_FRESH_MS = 20_000;
+
+// Liveness probe for the FL bridge (e.g. verify-live's wait-for-bridge
+// loop). Returns true only when the heartbeat file exists, is non-empty
+// (a 0-byte file is a tombstone left by OnDeInit), and was modified
+// within the freshness window (a stale mtime means FL is closed — the
+// file cannot be deleted from FL's side, so staleness is the only
+// death signal).
 export async function isBridgeAlive(ipcDir: string = DEFAULT_IPC_DIR): Promise<boolean> {
   try {
-    if (!existsSync(ipcDir)) return false;
-    const entries = await readdir(ipcDir);
-    return entries.includes("bridge_alive.txt");
+    const s = await stat(join(ipcDir, "bridge_alive.txt"));
+    if (s.size === 0) return false;
+    return Date.now() - s.mtimeMs < HEARTBEAT_FRESH_MS;
   } catch {
     return false;
   }

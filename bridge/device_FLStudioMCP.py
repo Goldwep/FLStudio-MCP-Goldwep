@@ -213,6 +213,15 @@ def _log(level, msg):
 
 MAX_REQUESTS_PER_TICK = 8
 
+# Heartbeat refresh cadence. FL Python cannot delete files, so a stale
+# bridge_alive.txt survives FL closing (OnDeInit merely truncates it, and
+# OnDeInit doesn't even fire on crash/kill). Liveness therefore comes from
+# FRESHNESS: OnIdle rewrites the heartbeat timestamp every N seconds and
+# the Node side treats a heartbeat older than its freshness window (or
+# 0-byte) as dead.
+HEARTBEAT_INTERVAL_SEC = 5.0
+_last_heartbeat = 0.0
+
 # State-sync subscription (L8b primitives).
 _subscribed = False
 _dirty_events = []  # list[dict]
@@ -258,7 +267,12 @@ def OnInit():
 
     # Write a heartbeat file so Node-side `wait_for_bridge` can detect us
     # before the first real request. Content is just the start timestamp.
-    if not _write_bytes(HEARTBEAT_PATH, str(int(time.time() * 1000)), append=False):
+    # OnIdle refreshes this every HEARTBEAT_INTERVAL_SEC so the Node side
+    # can distinguish "FL running" from "stale file left by a dead FL".
+    global _last_heartbeat
+    if _write_bytes(HEARTBEAT_PATH, str(int(time.time() * 1000)), append=False):
+        _last_heartbeat = time.time()
+    else:
         _log("WARN", "OnInit: heartbeat write failed (all primitives)")
 
     msg = "MCP file-IPC bridge ready at %s" % IPC_DIR
@@ -287,6 +301,16 @@ def OnIdle():
     """
     if not os.path.isdir(str(IPC_DIR)):
         return
+
+    # Refresh the heartbeat so Node-side liveness checks can rely on
+    # mtime freshness (a heartbeat older than the freshness window means
+    # FL is closed, even though the file itself can never be deleted
+    # from FL's side).
+    global _last_heartbeat
+    now = time.time()
+    if now - _last_heartbeat >= HEARTBEAT_INTERVAL_SEC:
+        if _write_bytes(HEARTBEAT_PATH, str(int(now * 1000)), append=False):
+            _last_heartbeat = now
 
     try:
         entries = os.listdir(str(IPC_DIR))

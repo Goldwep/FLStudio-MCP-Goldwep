@@ -1,6 +1,8 @@
 # Install — Bridging FL Studio to the MCP server
 
-> **Status:** v0.9.2-file-ipc. After completing this guide, ~96 of the 110 MCP tools start working (real-time FL Studio control via the file-IPC bridge). The L7 PyFLP tools (8) work without FL; the L6 piano-roll deploy tools (6) work without the bridge.
+> **Status:** v1.0.1 (live-verified). After completing this guide, ~96 of the 110 MCP tools start working (real-time FL Studio control via the file-IPC bridge). The L7 PyFLP tools (8) work without FL (see [`L7-PYFLP-SETUP.md`](./L7-PYFLP-SETUP.md) — requires a Python ≤ 3.10 venv); the L6 piano-roll deploy tools (6) work without the bridge.
+>
+> **Hardware prerequisite:** FL Studio only executes MIDI controller scripts when at least one MIDI input port exists. No controller plugged in and no virtual port = the bridge never runs (`midiInGetNumDevs() == 0` means every controller assignment stays dormant). Plug in any USB MIDI device or install loopMIDI (below).
 
 ## Architecture
 
@@ -171,8 +173,8 @@ Useful for debugging — shows every OnInit, every dispatched method, and any er
 
 Per the audit (`docs/AUDIT-CYCLE.md`), 10 tools call FL APIs that are documented but have zero vendor-script precedent. If `transport_set_tempo`, `mixer_set_send_level`, `mixer_set_eq_gain`, `mixer_set_eq_freq`, `mixer_link_channel_to_track`, `transport_get_song_length`, `general_get_rec_ppb`, `arrangement_current_time`, or `ui_get_focused_form_id` throw with `AttributeError: module 'X' has no attribute 'Y'`, the API doesn't exist in your FL build. Use the documented alternative (e.g. `mixer_link_track_to_channel` instead of `mixer_link_channel_to_track`).
 
-## What's next (post-v0.9.2)
+## What's next (post-v1.0.1)
 
-- **Probe-2** — confirm `processRECEvent(REC_Chan_NoteOn, ...)` actually adds a note to the pattern (L0 confirmed the call is accepted; landing is the open question). If yes → L6 collapses into REC-based live composition.
-- **Tag v1.0.0** — once bridge round-trip is verified against FL Studio and `[UNVERIFIED]` flags are resolved.
+- **Write-side live verification** — `npm run verify:live -- --include-writes` against a scratch project (the 49 write/mutating ops have mock coverage but have never run against live FL).
+- **Probe-2 (REC noteOn landing)** — confirm `processRECEvent(REC_Chan_NoteOn, ...)` actually adds a note to the pattern (L0 confirmed the call is accepted; landing is the open question). If yes → L6 collapses into REC-based live composition.
 - See [`AUDIT-CYCLE.md`](./AUDIT-CYCLE.md) and [`DOMAIN-MAP.md`](./DOMAIN-MAP.md) for the full roadmap.

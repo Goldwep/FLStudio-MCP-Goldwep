@@ -24,3 +24,4 @@ docs/LIVE-VERIFY-REPORT.md
 *.fnv
 *.zip
 Backup/
+.venv-pyflp/
