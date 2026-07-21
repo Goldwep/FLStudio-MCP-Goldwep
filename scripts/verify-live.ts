@@ -242,7 +242,11 @@ const PROBES: Probe[] = [
     kind: "write",
     module: "mixer",
   },
-  { method: "mixer.linkTrackToChannel", args: { mode: 0 }, kind: "write", module: "mixer" },
+  // linkTrackToChannel pops FL's "No channels" MODAL when the current
+  // channel/track selection has no valid link target (e.g. a near-empty
+  // project) — and an open modal stalls the mutation gate for the rest of
+  // the run (same failure class as transport.record). Manual-only.
+  { method: "mixer.linkTrackToChannel", args: { mode: 0 }, kind: "manual", module: "mixer" },
   {
     method: "mixer.setRouteTo",
     args: { source: 1, dest: 0, value: -1 },

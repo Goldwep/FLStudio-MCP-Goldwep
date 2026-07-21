@@ -24,11 +24,25 @@ With no modal open, writes succeed **inline from the OnIdle dispatch** — no sp
 setChannelName -> ok in ~50ms, readback confirms
 ```
 
+### Full live verification (2026-07-21, saved project, no modal)
+
+```
+$ npm run verify:live -- --include-writes
+OVERALL: 75 ok / 0 fail / 0 timeout / 13 skip   —   all green
+  channels : 20 ok / 0 fail   (every getter AND setter, incl. midiNoteOn, setGridBit, setStepParameterByIndex)
+  mixer    : 20 ok / 0 fail   (setTrackVolume/Pan/Color/Name, mute/solo/arm, linkChannelToTrack, ...)
+  patterns :  9 ok / 0 fail   (selectPattern, setPatternName/Color/Length, jumpToPattern)
+  transport: 10 ok / 0 fail   (start/stop, setLoopMode, setSongPos, toggleMetronome, tapTempo)
+```
+
+The 13 skips are: 7 plugins probes (empty test project has no plugins loaded), 3 mixer routing-level ops, `transport.record` + `mixer.linkTrackToChannel` (kind `manual`, modal-poppers), and 1 general write.
+
 ## Rules for reliable writes
 
 1. **Work against a saved project.** A never-saved ("Untitled") project pops the Save-as modal on the first risky operation (record, sometimes start). One manual save removes the whole failure class.
 2. **Don't drive record/start probes unattended on unsaved projects.** `verify-live.ts` marks `transport.record` as kind `"manual"` — it never auto-runs, even with `--include-writes`.
 3. **If writes suddenly all fail with "unsafe at current time": look for a modal.** Dismiss it (Escape / Cancel / WM_CLOSE to the dialog window) and writes resume immediately.
+4. **Some setters pop their own modal on an invalid target.** `mixer.linkTrackToChannel` with no valid channel/track selection raises FL's "No channels" message box, which then stalls the gate. `verify-live.ts` marks it `manual`; in normal use only call it when a real link target exists.
 
 ## Defense in depth: the deferred-flush queue
 
