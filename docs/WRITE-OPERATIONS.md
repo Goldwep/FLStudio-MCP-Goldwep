@@ -58,3 +58,7 @@ Node-side callers see either a normal (delayed) success or a clean `FL_DISPATCH_
 
 - **FL only executes controller scripts when the assigned MIDI input port opens.** `midiInGetNumDevs() == 0` → no bridge at all.
 - **A zombie MIDI driver blocks OnIdle silently.** After a power interruption, the MPKmini2 driver enumerated but returned `MMSYSERR_NOTENABLED (7)` on open — FL loaded the script (OnInit on reload) but never pumped OnIdle. Reads AND writes both time out; the heartbeat goes stale (which the Node side now detects and reports as `BRIDGE_NOT_READY`). Fix: replug the USB device (or `pnputil /restart-device` as admin), then restart FL or re-select the controller.
+
+## Verify runs leave toggle residue
+
+`verify-live --include-writes` exercises toggle-style probes (`mixer.muteTrack`/`soloTrack` with `value: -1`, `channels.muteChannel`/`selectChannel`, metronome toggle, …) that **mutate the project they run against and don't restore state**. The sneakiest: the `soloTrack` probe on insert 1 solos it, which FL implements by muting every other insert — inaudible while nothing routes there, but the moment channels get routed to inserts 2+, only insert 1 plays. Diagnose with `mixer.isTrackMuted` across inserts; fix with explicit `muteTrack(index, value=0)`. Run verify against a scratch project, or expect to sweep mute/solo state afterward.
