@@ -72,7 +72,7 @@ async function waitForBridge(ipcDir: string): Promise<boolean> {
 //   - "internal"    : MCP-bridge primitive, always safe to run
 // ---------------------------------------------------------------------------
 
-type ProbeKind = "read" | "write" | "audible" | "internal";
+type ProbeKind = "read" | "write" | "audible" | "internal" | "manual";
 
 interface Probe {
   method: string;
@@ -94,7 +94,12 @@ const PROBES: Probe[] = [
   { method: "transport.getSongLength", args: { unit: 2 }, kind: "read", module: "transport" },
   { method: "transport.start", args: {}, kind: "audible", module: "transport" },
   { method: "transport.stop", args: {}, kind: "audible", module: "transport" },
-  { method: "transport.record", args: {}, kind: "audible", module: "transport" },
+  // transport.record is deliberately "manual": on an UNSAVED project it pops
+  // FL's "Save as" MODAL, and any open modal makes every subsequent mutating
+  // call raise "RuntimeError: Operation unsafe at current time" (empirically
+  // root-caused 2026-07-21 — this single probe poisoned three verify runs).
+  // Verify it by hand against a saved project.
+  { method: "transport.record", args: {}, kind: "manual", module: "transport" },
   { method: "transport.setLoopMode", args: {}, kind: "write", module: "transport" },
   {
     method: "transport.setSongPos",
@@ -385,6 +390,10 @@ interface Result {
 
 function shouldSkip(probe: Probe, includeWrites: boolean): boolean {
   if (probe.kind === "internal" || probe.kind === "read") return false;
+  // "manual" probes never auto-run — even with --include-writes — because
+  // they trigger modal dialogs that stall FL's mutation gate for the rest
+  // of the run (see transport.record note in PROBES).
+  if (probe.kind === "manual") return true;
   return !includeWrites;
 }
 
@@ -656,9 +665,11 @@ async function main(): Promise<number> {
       process.stdout.write(`ok ${fmtValue(r.value)}\n`);
     } else if (r.status === "skip") {
       const reason =
-        probe.kind === "audible"
-          ? "audible; --include-writes to test"
-          : "write; --include-writes to test";
+        probe.kind === "manual"
+          ? "manual-only; pops a modal (see PROBES note)"
+          : probe.kind === "audible"
+            ? "audible; --include-writes to test"
+            : "write; --include-writes to test";
       process.stdout.write(`skip (${reason})\n`);
     } else if (r.status === "timeout") {
       process.stdout.write(`TIMEOUT — ${r.error}\n`);

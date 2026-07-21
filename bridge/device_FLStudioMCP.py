@@ -222,6 +222,17 @@ MAX_REQUESTS_PER_TICK = 8
 HEARTBEAT_INTERVAL_SEC = 5.0
 _last_heartbeat = 0.0
 
+# Deferred-mutation queue. FL 2024 rejects direct mutating calls from the
+# background OnIdle poll with "Operation unsafe at current time"; project
+# mutation is only permitted from FL's event-driven SAFE contexts
+# (OnMidiMsg / OnRefresh), exactly as every bundled vendor script does it.
+# Write requests that trip the gate are parked here as
+# (req_id, raw, queued_at) and flushed from those callbacks. If no safe
+# context arrives within DEFER_TTL_SEC the request is answered with the
+# unsafe error so the Node caller doesn't hang.
+_deferred = []
+DEFER_TTL_SEC = 30.0
+
 # State-sync subscription (L8b primitives).
 _subscribed = False
 _dirty_events = []  # list[dict]
@@ -361,7 +372,19 @@ def OnIdle():
         # but truncating to 0 bytes is the working equivalent.
         _safe_remove(req_path)
 
-        response_bytes, req_id = _handle_request(raw)
+        response_bytes, req_id, unsafe = _handle_request(raw)
+
+        # If the call hit FL's "unsafe at current time" gate, park it for
+        # the next event-driven SAFE context (OnMidiMsg / OnRefresh) rather
+        # than returning the error now. FL only permits project mutation
+        # from those callbacks -- confirmed by every bundled vendor script
+        # (Akai Fire, etc.), which mutate exclusively from OnMidiMsg. A
+        # background OnIdle poll is never a safe mutation context. Read-only
+        # calls never trip this, so they respond inline with zero latency.
+        if unsafe:
+            _deferred.append((req_id, raw, now))
+            processed += 1
+            continue
 
         # Write response. Bridge uses bytes-path + binary mode (works).
         resp_path = IPC_DIR / ("resp_%s.json" % _id_for_filename(req_id))
@@ -371,8 +394,42 @@ def OnIdle():
         processed += 1
 
 
+def _flush_deferred(ctx):
+    """Drain the deferred-mutation queue from an FL SAFE context.
+
+    Called from OnMidiMsg / OnRefresh -- the only callbacks where FL
+    permits project mutation. Each queued request is re-dispatched; if it
+    now succeeds (or fails with a non-"unsafe" error) we write its
+    response. If it STILL reports unsafe we requeue it, unless it has
+    aged past DEFER_TTL_SEC, in which case we give up and return the
+    unsafe error so the Node caller doesn't wait forever.
+    """
+    global _deferred
+    if not _deferred:
+        return
+    now = time.time()
+    still = []
+    for req_id, raw, queued_at in _deferred:
+        response_bytes, rid, unsafe = _handle_request(raw)
+        if unsafe and (now - queued_at) < DEFER_TTL_SEC:
+            still.append((req_id, raw, queued_at))
+            continue
+        resp_path = IPC_DIR / ("resp_%s.json" % _id_for_filename(rid))
+        if not _write_bytes(resp_path, response_bytes, append=False):
+            _log("ERROR", "flush(%s): could not write %s" % (ctx, resp_path.name))
+    _deferred = still
+
+
 def OnMidiMsg(event):
-    """Required entry point. Bridge does NOT consume MIDI -- pass through."""
+    """Required entry point. Bridge does NOT consume MIDI.
+
+    OnMidiMsg is FL's canonical SAFE mutation context, so we opportunistic-
+    ally flush any parked write requests here before passing the event
+    through. This is why writes land the moment a MIDI event arrives on the
+    bridge's port (play any key on the assigned controller, or have the Node
+    side send a loopback "kick" -- see docs/WRITE-OPERATIONS.md).
+    """
+    _flush_deferred("OnMidiMsg")
     event.handled = False
 
 
@@ -400,6 +457,10 @@ def OnDirtyMixerTrack(index):
 
 
 def OnRefresh(flags):
+    # OnRefresh is also a SAFE mutation context in FL -- flush parked
+    # writes here too so state changes triggered by UI/transport activity
+    # also drain the queue (belt-and-suspenders alongside OnMidiMsg).
+    _flush_deferred("OnRefresh")
     if _subscribed:
         _dirty_events.append({"kind": "refresh", "flags": flags})
 
@@ -513,6 +574,7 @@ def _handle_request(raw):
             return (
                 _err_response(req_id, "UnknownMethod: %s" % method),
                 req_id,
+                False,
             )
         try:
             result = handler(**args)
@@ -527,8 +589,25 @@ def _handle_request(raw):
                     traceback.format_exc(),
                 ),
                 req_id,
+                False,
             )
-        return (_ok_response(req_id, result), req_id)
+        except RuntimeError as exc:
+            # FL 2024 raises "Operation unsafe at current time" for direct
+            # mutating calls (setChannelName, muteChannel, processRECEvent,
+            # ...) dispatched mid-tick after file I/O. Empirically, the TOP
+            # of an OnIdle tick (before any file I/O) is a safe window. Flag
+            # the request as deferrable so OnIdle retries it there.
+            unsafe = "unsafe at current time" in str(exc)
+            return (
+                _err_response(
+                    req_id,
+                    "%s: %s" % (type(exc).__name__, exc),
+                    traceback.format_exc(),
+                ),
+                req_id,
+                unsafe,
+            )
+        return (_ok_response(req_id, result), req_id, False)
     except Exception as exc:
         return (
             _err_response(
@@ -537,6 +616,7 @@ def _handle_request(raw):
                 traceback.format_exc(),
             ),
             req_id,
+            False,
         )
 
 
@@ -695,7 +775,10 @@ def _channels_get_current_step_param(index, step, param):
 
 
 def _channels_set_step_parameter_by_index(index, step, param, value):
-    channels.setStepParameterByIndex(index, step, param, value)
+    # Real FL signature (live-verified 2026-07-18 + il-group stubs):
+    # setStepParameterByIndex(index, patNum, step, param, value,
+    # useGlobalIndex=False). We target the current pattern.
+    channels.setStepParameterByIndex(index, patterns.patternNumber(), step, param, value)
     return True
 
 
